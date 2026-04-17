@@ -1,0 +1,58 @@
+[
+  {
+    "pattern": "rm -rf /",
+    "regex": "rm\\s+-rf?\\s+\\/[^\\w]|rm\\s+-rf?\\s+\\/$",
+    "level": "critical",
+    "title": "Deletes everything on server",
+    "description": "rm -rf / will recursively delete ALL files on the entire server. This is irreversible.",
+    "requiresConfirm": true
+  },
+  {
+    "pattern": "chmod 777",
+    "regex": "chmod\\s+777",
+    "level": "medium",
+    "title": "Insecure permissions",
+    "description": "chmod 777 gives read, write and execute to everyone including other users.",
+    "requiresConfirm": false
+  },
+  {
+    "pattern": "dd if=",
+    "regex": "dd\\s+if=",
+    "level": "critical",
+    "title": "Disk cloning command",
+    "description": "dd can completely overwrite disk content if wrong device is specified.",
+    "requiresConfirm": true
+  },
+  {
+    "pattern": "mkfs",
+    "regex": "mkfs\\.",
+    "level": "critical",
+    "title": "Formats a disk",
+    "description": "mkfs formats and erases everything on a disk partition.",
+    "requiresConfirm": true
+  },
+  {
+    "pattern": "DROP DATABASE",
+    "regex": "DROP\\s+(TABLE|DATABASE)",
+    "level": "critical",
+    "title": "Deletes database objects",
+    "description": "This SQL command permanently deletes a table or entire database.",
+    "requiresConfirm": true
+  },
+  {
+    "pattern": "> /dev/sda",
+    "regex": ">\\s+/dev/sd",
+    "level": "critical",
+    "title": "Writing directly to disk device",
+    "description": "Writing directly to /dev/sdX can corrupt disk data.",
+    "requiresConfirm": true
+  },
+  {
+    "pattern": "shutdown/reboot/halt",
+    "regex": "^(shutdown|reboot|halt)\\b",
+    "level": "high",
+    "title": "Server availability impact",
+    "description": "This command can immediately stop or reboot the server.",
+    "requiresConfirm": true
+  }
+]

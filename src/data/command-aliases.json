@@ -1,0 +1,17 @@
+{
+  "mkdir": ["mkd", "md", "make dir", "make folder"],
+  "grep": ["grpe", "gerp"],
+  "docker": ["dokcer", "doker"],
+  "systemctl": ["sysctl service", "servicectl"],
+  "kubectl": ["kubeclt", "kctl", "kc"],
+  "terraform": ["terrafom", "tf"],
+  "npm": ["npn", "nodepm"],
+  "git": ["gti", "gt"],
+  "ssh": ["sssh"],
+  "chmod": ["chomd"],
+  "chown": ["chwon"],
+  "ls": ["dir list", "list files"],
+  "rm": ["remove file", "delete file"],
+  "cp": ["copy file"],
+  "mv": ["move file", "rename file"]
+}

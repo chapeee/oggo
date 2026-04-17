@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Oggo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+      };
+    </script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body class="bg-gray-50 dark:bg-[#0a0a0f] text-gray-900 dark:text-gray-100">
+    <div class="min-h-screen flex">
+      <aside class="w-64 border-r border-gray-200 dark:border-gray-800 p-4 bg-white dark:bg-[#111118] hidden md:block">
+        <div class="flex items-center gap-2 mb-8">
+          <div class="w-8 h-8 rounded-lg bg-orange-500 flex items-center justify-center text-white">
+            <i data-lucide="clock" class="w-5 h-5"></i>
+          </div>
+          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Oggo</h1>
+        </div>
+        <nav class="space-y-2 text-sm">
+          <div class="text-xs font-semibold tracking-wider text-gray-400 dark:text-gray-500 px-3 pb-2">NAVIGATION</div>
+          <button class="nav-btn w-full text-left px-3 py-2.5 rounded-lg flex gap-3 items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200" data-view="dashboard"><i data-lucide="layout-dashboard" class="w-4 h-4"></i>Dashboard</button>
+          <button class="nav-btn w-full text-left px-3 py-2.5 rounded-lg flex gap-3 items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200" data-view="jobs"><i data-lucide="clock-3" class="w-4 h-4"></i>Jobs</button>
+          <button class="nav-btn w-full text-left px-3 py-2.5 rounded-lg flex gap-3 items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200" data-view="logs"><i data-lucide="file-text" class="w-4 h-4"></i>Logs</button>
+          
+          <div class="text-xs font-semibold tracking-wider text-gray-400 dark:text-gray-500 px-3 pt-6 pb-2">SERVERS</div>
+          <div id="sidebar-servers-list" class="space-y-1 mb-2"></div>
+          <button class="nav-btn w-full text-left px-3 py-2.5 rounded-lg flex gap-3 items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200" data-view="servers"><i data-lucide="server" class="w-4 h-4"></i>All Servers</button>
+          <button class="nav-btn w-full text-left px-3 py-2.5 rounded-lg flex gap-3 items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200" data-view="terminal"><i data-lucide="terminal" class="w-4 h-4"></i>>_ SSH terminal</button>
+          
+          <div class="text-xs font-semibold tracking-wider text-gray-400 dark:text-gray-500 px-3 pt-6 pb-2">SYSTEM</div>
+          <button class="nav-btn w-full text-left px-3 py-2.5 rounded-lg flex gap-3 items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200" data-view="settings"><i data-lucide="settings" class="w-4 h-4"></i>Settings</button>
+        </nav>
+      </aside>
+
+      <main class="flex-1">
+        <header class="h-16 border-b border-gray-200 dark:border-gray-800 px-4 flex items-center justify-between bg-white dark:bg-[#111118]">
+          <div class="flex items-center gap-2">
+          </div>
+          <div class="flex items-center space-x-4">
+            <button id="server-restart-btn" class="text-gray-500 hover:text-orange-500 transition-colors" title="Restart Server">
+              <i data-lucide="rotate-cw" class="w-5 h-5"></i>
+            </button>
+            <button id="server-stop-btn" class="text-gray-500 hover:text-red-500 transition-colors" title="Stop Server">
+              <i data-lucide="power" class="w-5 h-5"></i>
+            </button>
+            <button id="theme-toggle" class="text-gray-500 hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
+              <i data-lucide="sun" class="w-5 h-5 hidden dark:block"></i>
+              <i data-lucide="moon" class="w-5 h-5 block dark:hidden"></i>
+            </button>
+          </div>
+        </header>
+        <section id="app-content" class="p-4 md:p-6"></section>
+      </main>
+    </div>
+
+    <div id="job-modal" class="hidden fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 w-full max-w-2xl">
+        <h3 class="text-lg font-semibold mb-3">Job</h3>
+        <div id="job-modal-body"></div>
+      </div>
+    </div>
+
+    <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
+
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/cronstrue@latest/dist/cronstrue.min.js"></script>
+    <script src="https://unpkg.com/cron-parser@4.9.0/lib/browser.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/theme.js"></script>
+    <script src="/js/cronBuilder.js"></script>
+    <script src="/js/app.js"></script>
+  </body>
+</html>

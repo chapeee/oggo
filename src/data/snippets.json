@@ -1,0 +1,74 @@
+[
+  {
+    "id": "builtin-001",
+    "title": "Check disk usage",
+    "command": "df -h",
+    "description": "Show disk usage for all mounted drives",
+    "tags": ["disk", "storage", "system"],
+    "category": "system",
+    "builtin": true
+  },
+  {
+    "id": "builtin-002",
+    "title": "Top memory processes",
+    "command": "ps aux --sort=-%mem | head -10",
+    "description": "Show 10 processes using most RAM",
+    "tags": ["memory", "ram", "processes"],
+    "category": "system",
+    "builtin": true
+  },
+  {
+    "id": "builtin-003",
+    "title": "Follow nginx error log",
+    "command": "tail -f /var/log/nginx/error.log",
+    "description": "Watch nginx errors in real time",
+    "tags": ["nginx", "logs", "errors"],
+    "category": "nginx",
+    "builtin": true
+  },
+  {
+    "id": "builtin-004",
+    "title": "List Docker containers",
+    "command": "docker ps -a",
+    "description": "List all containers including stopped",
+    "tags": ["docker", "containers"],
+    "category": "docker",
+    "builtin": true
+  },
+  {
+    "id": "builtin-005",
+    "title": "Restart nginx",
+    "command": "sudo systemctl restart nginx",
+    "description": "Restart nginx service",
+    "tags": ["nginx", "service"],
+    "category": "nginx",
+    "builtin": true
+  },
+  {
+    "id": "builtin-006",
+    "title": "Git pull latest",
+    "command": "git pull --rebase",
+    "description": "Pull latest code with rebase",
+    "tags": ["git", "deploy"],
+    "category": "git",
+    "builtin": true
+  },
+  {
+    "id": "builtin-007",
+    "title": "Show open ports",
+    "command": "ss -tulpn",
+    "description": "Display listening sockets and owning processes",
+    "tags": ["network", "ports"],
+    "category": "system",
+    "builtin": true
+  },
+  {
+    "id": "builtin-008",
+    "title": "Tail app logs",
+    "command": "tail -f /var/log/syslog",
+    "description": "Live-follow system logs",
+    "tags": ["logs", "system"],
+    "category": "logs",
+    "builtin": true
+  }
+]

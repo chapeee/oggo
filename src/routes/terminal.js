@@ -1,0 +1,126 @@
+const express = require("express");
+const { getDb } = require("../db/database");
+const {
+  detectRisk,
+  explainCommand,
+  detectError,
+  getHistory,
+  recordTerminalHistory,
+  listSnippets,
+  addSnippet,
+  deleteSnippet,
+} = require("../services/commandIntelService");
+const { searchCommands, getCommand } = require("../services/tldrService");
+
+const router = express.Router();
+
+router.get("/suggest", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const serverId = String(req.query.serverId || req.query.server_id || "local");
+    if (!q) return res.json({ data: { suggestions: [] } });
+
+    const historyRows = getDb()
+      .prepare(`
+        SELECT command, COUNT(*) as freq
+        FROM terminal_history
+        WHERE command LIKE ? AND server_id = ?
+        GROUP BY command
+        ORDER BY freq DESC
+        LIMIT 4
+      `)
+      .all(`${q}%`, serverId);
+
+    const tldrRows = await searchCommands(q, 6);
+    const suggestions = [];
+
+    historyRows.forEach((row) => {
+      suggestions.push({
+        cmd: row.command,
+        desc: `Used ${row.freq} time${row.freq > 1 ? "s" : ""}`,
+        source: "history",
+        icon: "clock",
+      });
+    });
+
+    tldrRows.forEach((row) => {
+      const alreadyInHistory = suggestions.some((item) => item.cmd.startsWith(row.name));
+      if (!alreadyInHistory) {
+        suggestions.push({
+          cmd: row.name,
+          desc: row.description,
+          source: "tldr",
+          icon: "book",
+          examples: Array.isArray(row.examples) ? row.examples.slice(0, 3) : [],
+        });
+      }
+    });
+
+    return res.json({ data: { suggestions: suggestions.slice(0, 8) } });
+  } catch (error) {
+    return res.status(500).json({ error: error.message, code: "SUGGEST_FAILED" });
+  }
+});
+
+router.get("/command/:name", async (req, res) => {
+  try {
+    const command = await getCommand(req.params.name);
+    if (!command) {
+      return res.status(404).json({ error: "Command not found", code: "NOT_FOUND" });
+    }
+    return res.json({ data: command });
+  } catch (error) {
+    return res.status(500).json({ error: error.message, code: "COMMAND_LOOKUP_FAILED" });
+  }
+});
+
+router.get("/history", (req, res) => {
+  const serverId = String(req.query.serverId || "local");
+  const limit = Number(req.query.limit || 1000);
+  res.json({ data: getHistory(serverId, limit) });
+});
+
+router.post("/history", (req, res) => {
+  const { serverId = "local", command = "", output = "", status = "success" } = req.body || {};
+  if (!command) {
+    return res.status(400).json({ error: "command is required", code: "VALIDATION_ERROR" });
+  }
+  recordTerminalHistory(String(serverId), String(command), String(output), String(status));
+  const error = detectError(output);
+  return res.json({ data: { saved: true, error } });
+});
+
+router.post("/risk-check", (req, res) => {
+  const command = String(req.body?.command || "");
+  const risk = detectRisk(command);
+  res.json({ data: risk });
+});
+
+router.post("/explain", async (req, res) => {
+  const command = String(req.body?.command || "");
+  if (!command) {
+    return res.status(400).json({ error: "command is required", code: "VALIDATION_ERROR" });
+  }
+  const data = await explainCommand(command);
+  return res.json({ data });
+});
+
+router.get("/snippets", (req, res) => {
+  res.json({ data: listSnippets() });
+});
+
+router.post("/snippets", (req, res) => {
+  const payload = req.body || {};
+  if (!payload.title || !payload.command) {
+    return res.status(400).json({ error: "title and command are required", code: "VALIDATION_ERROR" });
+  }
+  const created = addSnippet(payload);
+  return res.status(201).json({ data: created });
+});
+
+router.delete("/snippets/:id", (req, res) => {
+  deleteSnippet(req.params.id);
+  res.json({ data: { deleted: true } });
+});
+
+module.exports = router;

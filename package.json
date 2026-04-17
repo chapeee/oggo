@@ -1,0 +1,58 @@
+{
+  "name": "oggo",
+  "version": "1.0.0",
+  "description": "Self-hosted cron job manager with browser GUI",
+  "main": "src/server.js",
+  "bin": {
+    "oggo": "./bin/oggo.js"
+  },
+  "preferGlobal": true,
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chapeee/oggo.git"
+  },
+  "keywords": [
+    "cron",
+    "cronjob",
+    "scheduler",
+    "gui",
+    "web",
+    "pm2"
+  ],
+  "author": "Rajneesh (Chapeee)",
+  "license": "BUSL-1.1",
+  "bugs": {
+    "url": "https://github.com/chapeee/oggo/issues"
+  },
+  "homepage": "https://github.com/chapeee/oggo#readme",
+  "dependencies": {
+    "ansi-regex": "^5.0.1",
+    "better-sqlite3": "^11.8.1",
+    "commander": "^12.1.0",
+    "cron-parser": "^4.9.0",
+    "cronstrue": "^2.53.0",
+    "crypto-js": "^4.2.0",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.0",
+    "fuse.js": "^7.0.0",
+    "node-cron": "^3.0.3",
+    "node-pty": "^1.1.0-beta4",
+    "pm2": "^5.4.3",
+    "ssh2": "^1.15.0",
+    "strip-ansi": "^6.0.1",
+    "tldr": "^3.3.4",
+    "ws": "^8.18.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0",
+    "xterm-addon-search": "^0.15.0",
+    "xterm-addon-web-links": "^0.9.0"
+  }
+}
