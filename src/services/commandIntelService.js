@@ -6,7 +6,7 @@ const FuseImport = require("fuse.js");
 const stripAnsiImport = require("strip-ansi");
 const ansiRegexImport = require("ansi-regex");
 const { v4: uuidv4 } = require("uuid");
-const { getDb } = require("../db/database");
+const { getDbEngine, get, all, run } = require("../db/database");
 const { getoggoDataDir } = require("./platformService");
 
 const TLDR_ZIP_URL = "https://github.com/tldr-pages/tldr/releases/latest/download/tldr-pages.zip";
@@ -63,24 +63,40 @@ function parseTldrMarkdown(content, fallbackName) {
   return { name, description, examples };
 }
 
-function upsertCommand(parsed, platform) {
-  getDb()
-    .prepare(`
+async function upsertCommand(parsed, platform) {
+  const examples = JSON.stringify(parsed.examples);
+  if (getDbEngine() === "mysql") {
+    await run(
+      `
+        INSERT INTO commands (name, description, examples, platform, use_count)
+        VALUES (?, ?, ?, ?, COALESCE((SELECT use_count FROM (SELECT * FROM commands) AS c WHERE name = ?), 0))
+        ON DUPLICATE KEY UPDATE
+          description = VALUES(description),
+          examples = VALUES(examples),
+          platform = VALUES(platform)
+      `,
+      [parsed.name, parsed.description, examples, platform, parsed.name]
+    );
+    return;
+  }
+  await run(
+    `
       INSERT INTO commands (name, description, examples, platform, use_count)
       VALUES (?, ?, ?, ?, COALESCE((SELECT use_count FROM commands WHERE name = ?), 0))
       ON CONFLICT(name) DO UPDATE SET
         description = excluded.description,
         examples = excluded.examples,
         platform = excluded.platform
-    `)
-    .run(parsed.name, parsed.description, JSON.stringify(parsed.examples), platform, parsed.name);
+    `,
+    [parsed.name, parsed.description, examples, platform, parsed.name]
+  );
 }
 
-function ensureCommandSeedData() {
+async function ensureCommandSeedData() {
   if (!fs.existsSync(commandsSeedPath)) return;
   const rows = fs.readJSONSync(commandsSeedPath);
   for (const row of rows) {
-    upsertCommand(
+    await upsertCommand(
       {
         name: row.name,
         description: row.description || "",
@@ -113,7 +129,7 @@ async function parseTldrIntoDatabase() {
     for (const file of files) {
       const markdown = await fs.readFile(path.join(platformDir, file), "utf8");
       const parsed = parseTldrMarkdown(markdown, file.replace(/\.md$/, ""));
-      upsertCommand(parsed, platform);
+      await upsertCommand(parsed, platform);
     }
   }
   invalidateCommandIndex();
@@ -139,8 +155,8 @@ async function downloadAndCacheTldrPages() {
 }
 
 async function ensureTldrDatabaseReady() {
-  ensureCommandSeedData();
-  const countBefore = getDb().prepare("SELECT COUNT(*) as c FROM commands").get().c;
+  await ensureCommandSeedData();
+  const countBefore = (await get("SELECT COUNT(*) as c FROM commands"))?.c || 0;
   if (!shouldRefreshTldr() && countBefore > 0) return;
   try {
     await downloadAndCacheTldrPages();
@@ -155,10 +171,8 @@ function invalidateCommandIndex() {
   cachedCommandList = [];
 }
 
-function buildCommandIndex() {
-  const rows = getDb()
-    .prepare("SELECT name, description, examples, platform, use_count FROM commands ORDER BY use_count DESC")
-    .all()
+async function buildCommandIndex() {
+  const rows = (await all("SELECT name, description, examples, platform, use_count FROM commands ORDER BY use_count DESC"))
     .map((row) => ({
       ...row,
       examples: (() => {
@@ -182,21 +196,19 @@ function buildCommandIndex() {
   });
 }
 
-function getSuggestions(query, serverId = "local") {
+async function getSuggestions(query, serverId = "local") {
   const q = String(query || "").trim();
   if (!q) return { suggestions: [] };
-  if (!cachedFuse) buildCommandIndex();
+  if (!cachedFuse) await buildCommandIndex();
 
-  const historyMatches = getDb()
-    .prepare(`
+  const historyMatches = (await all(`
       SELECT command, COUNT(*) as freq
       FROM terminal_history
       WHERE command LIKE ? AND server_id = ?
       GROUP BY command
       ORDER BY freq DESC
       LIMIT 5
-    `)
-    .all(`%${q}%`, serverId)
+    `, [`%${q}%`, serverId]))
     .map((row) => ({
       cmd: row.command,
       source: "history",
@@ -369,45 +381,49 @@ function detectError(outputRaw) {
   return null;
 }
 
-function recordTerminalHistory(serverId, command, output = "", status = "success") {
-  getDb()
-    .prepare("INSERT INTO terminal_history (id, server_id, command, output, status, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(uuidv4(), serverId, command, output, status, new Date().toISOString());
+async function recordTerminalHistory(serverId, command, output = "", status = "success") {
+  await run(
+    "INSERT INTO terminal_history (id, server_id, command, output, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [uuidv4(), serverId, command, output, status, new Date().toISOString()]
+  );
 }
 
 function getHistory(serverId, limit = 1000) {
-  return getDb()
-    .prepare("SELECT command, output, status, created_at FROM terminal_history WHERE server_id = ? ORDER BY created_at DESC LIMIT ?")
-    .all(serverId, Number(limit));
+  return all(
+    "SELECT command, output, status, created_at FROM terminal_history WHERE server_id = ? ORDER BY created_at DESC LIMIT ?",
+    [serverId, Number(limit)]
+  );
 }
 
-function ensureBuiltinSnippets() {
+async function ensureBuiltinSnippets() {
   if (!fs.existsSync(snippetsPath)) return;
   const rows = fs.readJSONSync(snippetsPath);
-  const stmt = getDb().prepare(`
-    INSERT INTO snippets (id, title, command, description, tags, category, builtin, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO NOTHING
-  `);
   const now = new Date().toISOString();
   for (const row of rows) {
-    stmt.run(
-      row.id,
-      row.title,
-      row.command,
-      row.description || "",
-      JSON.stringify(row.tags || []),
-      row.category || "general",
-      row.builtin ? 1 : 0,
-      now
-    );
+    if (getDbEngine() === "mysql") {
+      await run(
+        `
+          INSERT INTO snippets (id, title, command, description, tags, category, builtin, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE id = id
+        `,
+        [row.id, row.title, row.command, row.description || "", JSON.stringify(row.tags || []), row.category || "general", row.builtin ? 1 : 0, now]
+      );
+    } else {
+      await run(
+        `
+          INSERT INTO snippets (id, title, command, description, tags, category, builtin, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO NOTHING
+        `,
+        [row.id, row.title, row.command, row.description || "", JSON.stringify(row.tags || []), row.category || "general", row.builtin ? 1 : 0, now]
+      );
+    }
   }
 }
 
-function listSnippets() {
-  return getDb()
-    .prepare("SELECT * FROM snippets ORDER BY builtin DESC, created_at DESC")
-    .all()
+async function listSnippets() {
+  return (await all("SELECT * FROM snippets ORDER BY builtin DESC, created_at DESC"))
     .map((row) => {
       try {
         return { ...row, tags: JSON.parse(row.tags || "[]") };
@@ -417,7 +433,7 @@ function listSnippets() {
     });
 }
 
-function addSnippet(payload) {
+async function addSnippet(payload) {
   const record = {
     id: uuidv4(),
     title: payload.title,
@@ -428,14 +444,15 @@ function addSnippet(payload) {
     builtin: 0,
     created_at: new Date().toISOString(),
   };
-  getDb()
-    .prepare("INSERT INTO snippets (id, title, command, description, tags, category, builtin, created_at) VALUES (@id, @title, @command, @description, @tags, @category, @builtin, @created_at)")
-    .run(record);
+  await run(
+    "INSERT INTO snippets (id, title, command, description, tags, category, builtin, created_at) VALUES (@id, @title, @command, @description, @tags, @category, @builtin, @created_at)",
+    record
+  );
   return record;
 }
 
 function deleteSnippet(id) {
-  getDb().prepare("DELETE FROM snippets WHERE id = ? AND builtin = 0").run(id);
+  return run("DELETE FROM snippets WHERE id = ? AND builtin = 0", [id]);
 }
 
 module.exports = {

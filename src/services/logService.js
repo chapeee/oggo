@@ -2,7 +2,7 @@ const fs = require("fs-extra");
 const path = require("path");
 const winston = require("winston");
 const { randomUUID } = require("crypto");
-const { getDb } = require("../db/database");
+const { run, all } = require("../db/database");
 const { getLogsDir } = require("./platformService");
 
 fs.ensureDirSync(getLogsDir());
@@ -26,8 +26,7 @@ const appLogger = winston.createLogger({
   ],
 });
 
-function addLog(log, config) {
-  const db = getDb();
+async function addLog(log, config) {
   const now = new Date().toISOString();
   const record = {
     id: randomUUID(),
@@ -41,38 +40,33 @@ function addLog(log, config) {
     created_at: log.created_at || now,
   };
 
-  const insert = db.prepare(`
+  await run(`
     INSERT INTO logs (id, job_id, job_name, status, output, error, duration, exit_code, created_at)
     VALUES (@id, @job_id, @job_name, @status, @output, @error, @duration, @exit_code, @created_at)
-  `);
-  insert.run(record);
+  `, record);
 
-  pruneLogs(record.job_id, config);
+  await pruneLogs(record.job_id, config);
   return record;
 }
 
-function pruneLogs(jobId, config) {
+async function pruneLogs(jobId, config) {
   if (!jobId) return;
-  const db = getDb();
   const maxLogsPerJob = Math.max(10, Number(config?.maxLogsPerJob || 100));
   const retentionDays = Math.max(1, Number(config?.logRetentionDays || 30));
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
 
-  db.prepare("DELETE FROM logs WHERE job_id = ? AND created_at < ?").run(jobId, cutoff);
+  await run("DELETE FROM logs WHERE job_id = ? AND created_at < ?", [jobId, cutoff]);
 
-  db.prepare(`
-    DELETE FROM logs
-    WHERE id IN (
-      SELECT id FROM logs
-      WHERE job_id = ?
-      ORDER BY created_at DESC
-      LIMIT -1 OFFSET ?
-    )
-  `).run(jobId, maxLogsPerJob);
+  const keepRows = await all(
+    "SELECT id FROM logs WHERE job_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    [jobId, 1000000, maxLogsPerJob]
+  );
+  for (const row of keepRows) {
+    await run("DELETE FROM logs WHERE id = ?", [row.id]);
+  }
 }
 
-function getLogs({ jobId, status, limit = 100, offset = 0 } = {}) {
-  const db = getDb();
+async function getLogs({ jobId, status, limit = 100, offset = 0 } = {}) {
   const where = [];
   const values = [];
 
@@ -92,15 +86,15 @@ function getLogs({ jobId, status, limit = 100, offset = 0 } = {}) {
     LIMIT ? OFFSET ?
   `;
   values.push(Number(limit), Number(offset));
-  return db.prepare(sql).all(...values);
+  return all(sql, values);
 }
 
 function clearJobLogs(jobId) {
-  return getDb().prepare("DELETE FROM logs WHERE job_id = ?").run(jobId);
+  return run("DELETE FROM logs WHERE job_id = ?", [jobId]);
 }
 
 function clearAllLogs() {
-  return getDb().prepare("DELETE FROM logs").run();
+  return run("DELETE FROM logs", []);
 }
 
 module.exports = {

@@ -1,5 +1,5 @@
 const express = require("express");
-const { getDb } = require("../db/database");
+const { all } = require("../db/database");
 const {
   detectRisk,
   explainCommand,
@@ -20,16 +20,14 @@ router.get("/suggest", async (req, res) => {
     const serverId = String(req.query.serverId || req.query.server_id || "local");
     if (!q) return res.json({ data: { suggestions: [] } });
 
-    const historyRows = getDb()
-      .prepare(`
+    const historyRows = await all(`
         SELECT command, COUNT(*) as freq
         FROM terminal_history
         WHERE command LIKE ? AND server_id = ?
         GROUP BY command
         ORDER BY freq DESC
         LIMIT 4
-      `)
-      .all(`${q}%`, serverId);
+      `, [`${q}%`, serverId]);
 
     const tldrRows = await searchCommands(q, 6);
     const suggestions = [];
@@ -74,18 +72,18 @@ router.get("/command/:name", async (req, res) => {
   }
 });
 
-router.get("/history", (req, res) => {
+router.get("/history", async (req, res) => {
   const serverId = String(req.query.serverId || "local");
   const limit = Number(req.query.limit || 1000);
-  res.json({ data: getHistory(serverId, limit) });
+  res.json({ data: await getHistory(serverId, limit) });
 });
 
-router.post("/history", (req, res) => {
+router.post("/history", async (req, res) => {
   const { serverId = "local", command = "", output = "", status = "success" } = req.body || {};
   if (!command) {
     return res.status(400).json({ error: "command is required", code: "VALIDATION_ERROR" });
   }
-  recordTerminalHistory(String(serverId), String(command), String(output), String(status));
+  await recordTerminalHistory(String(serverId), String(command), String(output), String(status));
   const error = detectError(output);
   return res.json({ data: { saved: true, error } });
 });
@@ -105,21 +103,21 @@ router.post("/explain", async (req, res) => {
   return res.json({ data });
 });
 
-router.get("/snippets", (req, res) => {
-  res.json({ data: listSnippets() });
+router.get("/snippets", async (req, res) => {
+  res.json({ data: await listSnippets() });
 });
 
-router.post("/snippets", (req, res) => {
+router.post("/snippets", async (req, res) => {
   const payload = req.body || {};
   if (!payload.title || !payload.command) {
     return res.status(400).json({ error: "title and command are required", code: "VALIDATION_ERROR" });
   }
-  const created = addSnippet(payload);
+  const created = await addSnippet(payload);
   return res.status(201).json({ data: created });
 });
 
-router.delete("/snippets/:id", (req, res) => {
-  deleteSnippet(req.params.id);
+router.delete("/snippets/:id", async (req, res) => {
+  await deleteSnippet(req.params.id);
   res.json({ data: { deleted: true } });
 });
 

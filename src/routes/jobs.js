@@ -2,7 +2,7 @@ const express = require("express");
 const cron = require("node-cron");
 const { randomUUID } = require("crypto");
 const cronstrue = require("cronstrue");
-const { getDb } = require("../db/database");
+const { get, all, run } = require("../db/database");
 const { upsertJobSchedules, deleteJobSchedules, runJobNow } = require("../services/cronService");
 const { loadConfig } = require("../config/configLoader");
 
@@ -12,10 +12,8 @@ function toBoolInt(value) {
   return value ? 1 : 0;
 }
 
-router.get("/", (req, res) => {
-  const jobs = getDb()
-    .prepare("SELECT * FROM jobs ORDER BY created_at DESC")
-    .all()
+router.get("/", async (req, res) => {
+  const jobs = (await all("SELECT * FROM jobs ORDER BY created_at DESC"))
     .map((job) => {
       let humanSchedule = job.schedule;
       try {
@@ -28,8 +26,7 @@ router.get("/", (req, res) => {
   return res.json({ data: jobs });
 });
 
-router.post("/", (req, res) => {
-  const db = getDb();
+router.post("/", async (req, res) => {
   const now = new Date().toISOString();
   const job = {
     id: randomUUID(),
@@ -52,19 +49,18 @@ router.post("/", (req, res) => {
     return res.status(400).json({ error: "Invalid cron expression", code: "INVALID_SCHEDULE" });
   }
 
-  db.prepare(`
+  await run(`
     INSERT INTO jobs (id, name, command, schedule, description, enabled, notify, created_at, updated_at, last_run, last_status)
     VALUES (@id, @name, @command, @schedule, @description, @enabled, @notify, @created_at, @updated_at, @last_run, @last_status)
-  `).run(job);
+  `, job);
 
-  upsertJobSchedules(job, loadConfig());
+  await upsertJobSchedules(job, loadConfig());
   return res.status(201).json({ data: job });
 });
 
-router.put("/:id", (req, res) => {
-  const db = getDb();
+router.put("/:id", async (req, res) => {
   const id = req.params.id;
-  const existing = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id);
+  const existing = await get("SELECT * FROM jobs WHERE id = ?", [id]);
   if (!existing) {
     return res.status(404).json({ error: "Job not found", code: "NOT_FOUND" });
   }
@@ -87,40 +83,38 @@ router.put("/:id", (req, res) => {
     return res.status(400).json({ error: "Invalid cron expression", code: "INVALID_SCHEDULE" });
   }
 
-  db.prepare(`
+  await run(`
     UPDATE jobs
     SET name = @name, command = @command, schedule = @schedule, description = @description,
         enabled = @enabled, notify = @notify, updated_at = @updated_at
     WHERE id = @id
-  `).run(updated);
+  `, updated);
 
-  upsertJobSchedules(updated, loadConfig());
+  await upsertJobSchedules(updated, loadConfig());
   return res.json({ data: updated });
 });
 
-router.delete("/:id", (req, res) => {
-  const db = getDb();
+router.delete("/:id", async (req, res) => {
   const id = req.params.id;
-  const result = db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+  const result = await run("DELETE FROM jobs WHERE id = ?", [id]);
   if (!result.changes) {
     return res.status(404).json({ error: "Job not found", code: "NOT_FOUND" });
   }
-  deleteJobSchedules(id);
+  await deleteJobSchedules(id);
   return res.json({ message: "Job deleted" });
 });
 
-router.post("/:id/toggle", (req, res) => {
-  const db = getDb();
+router.post("/:id/toggle", async (req, res) => {
   const id = req.params.id;
-  const existing = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id);
+  const existing = await get("SELECT * FROM jobs WHERE id = ?", [id]);
   if (!existing) {
     return res.status(404).json({ error: "Job not found", code: "NOT_FOUND" });
   }
 
   const enabled = existing.enabled === 1 ? 0 : 1;
   const updated = { ...existing, enabled, updated_at: new Date().toISOString() };
-  db.prepare("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?").run(enabled, updated.updated_at, id);
-  upsertJobSchedules(updated, loadConfig());
+  await run("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?", [enabled, updated.updated_at, id]);
+  await upsertJobSchedules(updated, loadConfig());
   return res.json({ data: updated });
 });
 

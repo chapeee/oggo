@@ -1,6 +1,6 @@
 const express = require("express");
 const { v4: uuidv4 } = require("uuid");
-const { getDb } = require("../db/database");
+const { get, all, run } = require("../db/database");
 const {
   encrypt,
   sanitizeServer,
@@ -47,12 +47,12 @@ function mapServerPayload(body, existing = null) {
   return out;
 }
 
-router.get("/", (req, res) => {
-  const rows = getDb().prepare("SELECT * FROM servers ORDER BY sort_order ASC, created_at DESC").all();
+router.get("/", async (req, res) => {
+  const rows = await all("SELECT * FROM servers ORDER BY sort_order ASC, created_at DESC");
   res.json({ data: rows.map(sanitizeServer) });
 });
 
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   const payload = mapServerPayload(req.body || {});
   if (!payload.name || !payload.host || !payload.username) {
     return res.status(400).json({ error: "name, host and username are required", code: "VALIDATION_ERROR" });
@@ -64,8 +64,7 @@ router.post("/", (req, res) => {
     return res.status(400).json({ error: "Key auth requires private key path or pasted key", code: "VALIDATION_ERROR" });
   }
 
-  getDb()
-    .prepare(`
+  await run(`
       INSERT INTO servers (
         id, name, host, port, username, auth_type, password, private_key_path, private_key_content,
         passphrase, color, tags, notes, last_connected, last_status, created_at, sort_order
@@ -73,14 +72,13 @@ router.post("/", (req, res) => {
         @id, @name, @host, @port, @username, @auth_type, @password, @private_key_path, @private_key_content,
         @passphrase, @color, @tags, @notes, @last_connected, @last_status, @created_at, @sort_order
       )
-    `)
-    .run(payload);
+    `, payload);
 
   res.status(201).json({ data: sanitizeServer(payload) });
 });
 
-router.put("/:id", (req, res) => {
-  const existing = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+router.put("/:id", async (req, res) => {
+  const existing = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!existing) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const payload = mapServerPayload(req.body || {}, existing);
   if (payload.auth_type === "password" && !payload.password) {
@@ -90,54 +88,51 @@ router.put("/:id", (req, res) => {
     return res.status(400).json({ error: "Key auth requires private key path or pasted key", code: "VALIDATION_ERROR" });
   }
 
-  getDb()
-    .prepare(`
+  await run(`
       UPDATE servers SET
         name=@name, host=@host, port=@port, username=@username, auth_type=@auth_type, password=@password,
         private_key_path=@private_key_path, private_key_content=@private_key_content, passphrase=@passphrase,
         color=@color, tags=@tags, notes=@notes, last_connected=@last_connected, last_status=@last_status,
         sort_order=@sort_order
       WHERE id=@id
-    `)
-    .run(payload);
+    `, payload);
 
   res.json({ data: sanitizeServer(payload) });
 });
 
-router.delete("/:id", (req, res) => {
-  getDb().prepare("DELETE FROM servers WHERE id = ?").run(req.params.id);
-  getDb().prepare("DELETE FROM server_jobs WHERE server_id = ?").run(req.params.id);
+router.delete("/:id", async (req, res) => {
+  await run("DELETE FROM servers WHERE id = ?", [req.params.id]);
+  await run("DELETE FROM server_jobs WHERE server_id = ?", [req.params.id]);
   res.json({ message: "Server deleted" });
 });
 
 router.post("/:id/test", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const result = await testConnection(server);
   if (result.success) {
-    getDb().prepare("UPDATE servers SET last_connected = ?, last_status = ? WHERE id = ?")
-      .run(new Date().toISOString(), "online", server.id);
+    await run("UPDATE servers SET last_connected = ?, last_status = ? WHERE id = ?", [new Date().toISOString(), "online", server.id]);
   }
   res.json({ data: result });
 });
 
 router.get("/:id/status", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const status = await getServerStatus(server);
-  getDb().prepare("UPDATE servers SET last_status = ? WHERE id = ?").run(status.status, server.id);
+  await run("UPDATE servers SET last_status = ? WHERE id = ?", [status.status, server.id]);
   res.json({ data: status });
 });
 
 router.get("/:id/jobs", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const jobs = await getRemoteCrontab(server);
   res.json({ data: jobs });
 });
 
 router.post("/:id/jobs", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const existing = await getRemoteCrontab(server);
   const job = {
@@ -151,7 +146,7 @@ router.post("/:id/jobs", async (req, res) => {
 });
 
 router.put("/:id/jobs/:jobId", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const jobs = await getRemoteCrontab(server);
   const updatedJobs = jobs.map((j) => (j.id === req.params.jobId ? { ...j, ...req.body } : j));
@@ -160,7 +155,7 @@ router.put("/:id/jobs/:jobId", async (req, res) => {
 });
 
 router.delete("/:id/jobs/:jobId", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const jobs = await getRemoteCrontab(server);
   await writeRemoteCrontab(server, jobs.filter((j) => j.id !== req.params.jobId));
@@ -168,7 +163,7 @@ router.delete("/:id/jobs/:jobId", async (req, res) => {
 });
 
 router.post("/:id/jobs/:jobId/toggle", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const jobs = await getRemoteCrontab(server);
   const updatedJobs = jobs.map((j) => (j.id === req.params.jobId ? { ...j, enabled: !j.enabled } : j));
@@ -177,7 +172,7 @@ router.post("/:id/jobs/:jobId/toggle", async (req, res) => {
 });
 
 router.post("/:id/jobs/:jobId/run", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const jobs = await getRemoteCrontab(server);
   const job = jobs.find((j) => j.id === req.params.jobId);
@@ -187,7 +182,7 @@ router.post("/:id/jobs/:jobId/run", async (req, res) => {
 });
 
 router.post("/:id/connect", async (req, res) => {
-  const server = getDb().prepare("SELECT * FROM servers WHERE id = ?").get(req.params.id);
+  const server = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!server) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const result = await testConnection(server);
   res.json({ data: result });

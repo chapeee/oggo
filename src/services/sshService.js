@@ -4,7 +4,7 @@ const CryptoJS = require("crypto-js");
 const ping = require("ping");
 const { Client } = require("ssh2");
 const { v4: uuidv4 } = require("uuid");
-const { getDb } = require("../db/database");
+const { getDb, getDbEngine, get, run } = require("../db/database");
 const { loadConfig } = require("../config/configLoader");
 
 function getEncryptKey() {
@@ -27,18 +27,23 @@ function fingerprintFromHostKey(hostKey) {
   return crypto.createHash("sha256").update(hostKey).digest("base64");
 }
 
-function verifyOrSaveHostFingerprint(server, hostKey) {
+async function verifyOrSaveHostFingerprint(server, hostKey) {
   const config = loadConfig();
   if (!config?.security?.verifyHostKeys) return true;
-  const db = getDb();
   const fingerprint = fingerprintFromHostKey(hostKey);
-  const existing = db
-    .prepare("SELECT * FROM known_hosts WHERE host = ? AND port = ?")
-    .get(server.host, server.port || 22);
+  const existing = await get("SELECT * FROM known_hosts WHERE host = ? AND port = ?", [
+    server.host,
+    server.port || 22,
+  ]);
 
   if (!existing) {
-    db.prepare("INSERT INTO known_hosts (id, host, port, fingerprint, added_at) VALUES (?, ?, ?, ?, ?)")
-      .run(uuidv4(), server.host, server.port || 22, fingerprint, new Date().toISOString());
+    await run("INSERT INTO known_hosts (id, host, port, fingerprint, added_at) VALUES (?, ?, ?, ?, ?)", [
+      uuidv4(),
+      server.host,
+      server.port || 22,
+      fingerprint,
+      new Date().toISOString(),
+    ]);
     return true;
   }
   return existing.fingerprint === fingerprint;
@@ -55,18 +60,26 @@ function buildConnectConfig(server) {
     hostHash: "sha256",
     hostVerifier: (hostKeyHash, callback) => {
       try {
-        // ssh2 provides a hash string when hostHash is set; treat unknown as trusted first-time.
-        const db = getDb();
-        const existing = db
-          .prepare("SELECT * FROM known_hosts WHERE host = ? AND port = ?")
-          .get(server.host, Number(server.port || 22));
-        if (!existing) {
-          db.prepare("INSERT INTO known_hosts (id, host, port, fingerprint, added_at) VALUES (?, ?, ?, ?, ?)")
-            .run(uuidv4(), server.host, Number(server.port || 22), hostKeyHash, new Date().toISOString());
-          callback(true);
-          return;
-        }
-        callback(existing.fingerprint === hostKeyHash);
+        const port = Number(server.port || 22);
+        const saveOrVerify = async () => {
+          const existing = await get("SELECT * FROM known_hosts WHERE host = ? AND port = ?", [
+            server.host,
+            port,
+          ]);
+          if (!existing) {
+            await run("INSERT INTO known_hosts (id, host, port, fingerprint, added_at) VALUES (?, ?, ?, ?, ?)", [
+              uuidv4(),
+              server.host,
+              port,
+              hostKeyHash,
+              new Date().toISOString(),
+            ]);
+            callback(true);
+            return;
+          }
+          callback(existing.fingerprint === hostKeyHash);
+        };
+        saveOrVerify().catch(() => callback(false));
       } catch (_error) {
         callback(false);
       }

@@ -12,16 +12,60 @@ const pm2 = require("pm2");
 
 const PROCESS_NAME = "oggo-server";
 
-function promptFirstRun() {
+function askQuestion(rl, question) {
+  return new Promise((resolve) => rl.question(question, (answer) => resolve(answer)));
+}
+
+async function promptFirstRun() {
   return new Promise((resolve) => {
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
     });
-    rl.question("Welcome to Oggo! Which port would you like to run on? [3030]: ", (answer) => {
-      const port = parseInt(answer.trim(), 10) || 3030;
+    (async () => {
+      const portAnswer = await askQuestion(rl, "Welcome to Oggo! Which port would you like to run on? [3030]: ");
+      const port = parseInt(portAnswer.trim(), 10) || 3030;
+
+      const dbChoiceAnswer = await askQuestion(
+        rl,
+        "Choose database storage: 1) SQLite (default)  2) MySQL [1]: "
+      );
+      const useMysql = String(dbChoiceAnswer || "").trim() === "2";
+
+      if (!useMysql) {
+        rl.close();
+        resolve({
+          port,
+          database: {
+            client: "sqlite",
+          },
+        });
+        return;
+      }
+
+      const host = (await askQuestion(rl, "MySQL host / URL [localhost]: ")).trim() || "localhost";
+      const dbPort = parseInt((await askQuestion(rl, "MySQL port [3306]: ")).trim(), 10) || 3306;
+      const user = (await askQuestion(rl, "MySQL username: ")).trim();
+      const password = await askQuestion(rl, "MySQL password: ");
+      const databaseName = (await askQuestion(rl, "MySQL database name: ")).trim();
+
       rl.close();
-      resolve(port);
+      resolve({
+        port,
+        database: {
+          client: "mysql",
+          mysql: {
+            host,
+            port: dbPort,
+            user,
+            password,
+            database: databaseName,
+          },
+        },
+      });
+    })().catch((error) => {
+      rl.close();
+      throw error;
     });
   });
 }
@@ -36,9 +80,9 @@ function runCommand(fn) {
 async function startOggo() {
   const configPath = getConfigPath();
   if (!fs.existsSync(configPath)) {
-    const port = await promptFirstRun();
+    const firstRunConfig = await promptFirstRun();
     fs.ensureDirSync(getoggoDir());
-    fs.writeJsonSync(configPath, { port }, { spaces: 2 });
+    fs.writeJsonSync(configPath, firstRunConfig, { spaces: 2 });
   }
 
   console.log("Starting Oggo...");

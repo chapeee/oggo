@@ -1,7 +1,7 @@
 const cron = require("node-cron");
 const { exec, execSync, spawnSync } = require("child_process");
 const { promisify } = require("util");
-const { getDb } = require("../db/database");
+const { get, all, run } = require("../db/database");
 const { addLog, appLogger } = require("./logService");
 const { sendJobNotification } = require("./mailService");
 const { isUnix } = require("./platformService");
@@ -78,16 +78,11 @@ function removeJobFromSystemCrontab(jobId) {
 }
 
 async function executeJob(job) {
-  const db = getDb();
   const config = loadConfig();
   const start = Date.now();
   const startedAt = new Date().toISOString();
 
-  db.prepare("UPDATE jobs SET last_run = ?, last_status = ? WHERE id = ?").run(
-    startedAt,
-    "running",
-    job.id
-  );
+  await run("UPDATE jobs SET last_run = ?, last_status = ? WHERE id = ?", [startedAt, "running", job.id]);
 
   let status = "success";
   let stdout = "";
@@ -112,7 +107,7 @@ async function executeJob(job) {
   }
 
   const duration = Date.now() - start;
-  const log = addLog(
+  const log = await addLog(
     {
       job_id: job.id,
       job_name: job.name,
@@ -126,11 +121,11 @@ async function executeJob(job) {
     config
   );
 
-  db.prepare("UPDATE jobs SET last_status = ?, updated_at = ? WHERE id = ?").run(
+  await run("UPDATE jobs SET last_status = ?, updated_at = ? WHERE id = ?", [
     status,
     new Date().toISOString(),
-    job.id
-  );
+    job.id,
+  ]);
 
   try {
     await sendJobNotification(job, log, config);
@@ -169,13 +164,13 @@ function unscheduleJob(jobId) {
   scheduledJobs.delete(jobId);
 }
 
-function reloadAllJobs(config = loadConfig()) {
+async function reloadAllJobs(config = loadConfig()) {
   for (const task of scheduledJobs.values()) {
     task.stop();
   }
   scheduledJobs.clear();
 
-  const jobs = getDb().prepare("SELECT * FROM jobs WHERE enabled = 1").all();
+  const jobs = await all("SELECT * FROM jobs WHERE enabled = 1");
   jobs.forEach((job) => {
     try {
       scheduleJob(job, config);
@@ -185,7 +180,7 @@ function reloadAllJobs(config = loadConfig()) {
   });
 }
 
-function upsertJobSchedules(job, config = loadConfig()) {
+async function upsertJobSchedules(job, config = loadConfig()) {
   syncJobToSystemCrontab(job);
   unscheduleJob(job.id);
   if (job.enabled) {
@@ -193,14 +188,13 @@ function upsertJobSchedules(job, config = loadConfig()) {
   }
 }
 
-function deleteJobSchedules(jobId) {
+async function deleteJobSchedules(jobId) {
   removeJobFromSystemCrontab(jobId);
   unscheduleJob(jobId);
 }
 
 async function runJobNow(jobId) {
-  const db = getDb();
-  const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
+  const job = await get("SELECT * FROM jobs WHERE id = ?", [jobId]);
   if (!job) {
     throw new Error("Job not found.");
   }

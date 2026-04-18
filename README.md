@@ -6,6 +6,7 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20Us-blue.svg)](#)
 
 > A production-grade, self-hosted cron job and server management platform with a built-in SSH terminal.
+> Originally built as my own personal ops/control center on my machine — now open-sourced so everything lives in one place. Over time this will grow to include more of my real-world tools from my old setup: AWS helpers, mail systems, SMB viewer, database backup automation, notes, and a password manager.
 
 ---
 
@@ -41,13 +42,22 @@ cd oggo
 # 2. Install dependencies
 npm install
 
-# 3. Configure environment variables
-cp .env.example .env
-# Edit .env with your specific configuration
-
-# 4. Start the application
+# 3. Start the application
 npm start
 ```
+
+On first run, Oggo now asks what database you want to use:
+
+- `SQLite` for the current local-file setup
+- `MySQL` if you want a server database
+
+If you choose MySQL, the installer asks one-by-one for:
+
+- host / URL
+- port
+- username
+- password
+- database name
 
 Once running, Oggo will be available at `http://localhost:3030` (or the port specified in your config).
 

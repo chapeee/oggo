@@ -7,7 +7,7 @@ const cors = require("cors");
 const WebSocket = require("ws");
 const { Client } = require("ssh2");
 const { loadConfig, ensureFirstRunPaths, getConfigFilePath } = require("./config/configLoader");
-const { getDb, initializeDatabase } = require("./db/database");
+const { initializeDatabase, get, all, run } = require("./db/database");
 const { appLogger } = require("./services/logService");
 const { reloadAllJobs, getScheduledCount } = require("./services/cronService");
 const { buildConnectConfig } = require("./services/sshService");
@@ -45,14 +45,13 @@ function createApiErrorHandler(err, req, res, next) {
   return res.status(500).json({ error: err.message || "Internal server error", code: "INTERNAL_ERROR" });
 }
 
-function init() {
+async function init() {
   ensureFirstRunPaths();
   const config = loadConfig();
-  const isFirstRun = !fs.existsSync(getDbPath());
+  const isFirstRun = config.database?.client === "sqlite" ? !fs.existsSync(getDbPath()) : false;
 
-  getDb();
-  initializeDatabase();
-  ensureBuiltinSnippets();
+  await initializeDatabase();
+  await ensureBuiltinSnippets();
   initializeTldrIndex().then((commands) => {
     appLogger.info(`TLDR index ready with ${commands.length} commands`);
   }).catch((error) => {
@@ -69,7 +68,7 @@ function init() {
       appLogger.warn(`TLDR refresh failed: ${error.message}`);
     }
   }, 1000 * 60 * 60 * 24);
-  reloadAllJobs(config);
+  await reloadAllJobs(config);
 
   if (isFirstRun) {
     console.log("Welcome to Oggo!");
@@ -128,61 +127,53 @@ function init() {
     }, 1000);
   });
 
-  app.get("/api/dashboard", (req, res) => {
-    const db = getDb();
-    const totals = db
-      .prepare(
-        `
+  app.get("/api/dashboard", async (req, res) => {
+    const totals = await get(
+      `
           SELECT
             COUNT(*) as totalJobs,
             SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as activeJobs
           FROM jobs
         `
-      )
-      .get();
+    );
 
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const startOfDay = today.toISOString();
 
-    const failedToday = db
-      .prepare("SELECT COUNT(*) as count FROM logs WHERE status = 'failed' AND created_at >= ?")
-      .get(startOfDay).count;
+    const failedToday = (await get("SELECT COUNT(*) as count FROM logs WHERE status = 'failed' AND created_at >= ?", [startOfDay]))?.count || 0;
 
-    const successRateData = db
-      .prepare(
-        `
+    const successRateData = await get(
+      `
           SELECT
             COUNT(*) as total,
             SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success
           FROM logs
           WHERE created_at >= ?
-        `
-      )
-      .get(startOfDay);
+        `,
+      [startOfDay]
+    );
 
     const successRate = successRateData.total
       ? Math.round((100 * (successRateData.success || 0)) / successRateData.total)
       : 100;
 
-    const recentActivity = db
-      .prepare("SELECT * FROM logs ORDER BY created_at DESC LIMIT 10")
-      .all();
+    const recentActivity = await all("SELECT * FROM logs ORDER BY created_at DESC LIMIT 10");
 
     const last7Days = new Date();
     last7Days.setDate(last7Days.getDate() - 6);
     last7Days.setUTCHours(0, 0, 0, 0);
 
-    const logsLast7Days = db.prepare(`
+    const logsLast7Days = await all(`
       SELECT 
-        date(created_at) as log_date,
+        SUBSTRING(created_at, 1, 10) as log_date,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
       FROM logs
       WHERE created_at >= ?
       GROUP BY log_date
       ORDER BY log_date ASC
-    `).all(last7Days.toISOString());
+    `, [last7Days.toISOString()]);
 
     res.json({
       data: {
@@ -204,11 +195,13 @@ function init() {
   app.use(createApiErrorHandler);
 
   const port = Number(process.env.PORT || config.port || 3030);
-  const host = config.host || "localhost";
+  const configuredHost = process.env.HOST || config.host || "0.0.0.0";
+  const bindHost = configuredHost === "localhost" ? "0.0.0.0" : configuredHost;
+  const publicHost = configuredHost === "0.0.0.0" ? "localhost" : configuredHost;
   const httpServer = http.createServer(app);
   const wss = new WebSocket.Server({ server: httpServer });
 
-  wss.on("connection", (ws, req) => {
+  wss.on("connection", async (ws, req) => {
     const match = req.url.match(/^\/terminal\/([^/?]+)/);
     if (!match) {
       ws.close(1008, "Invalid terminal path");
@@ -216,8 +209,7 @@ function init() {
     }
 
     const serverId = match[1];
-    const db = getDb();
-    const serverRow = db.prepare("SELECT * FROM servers WHERE id = ?").get(serverId);
+    const serverRow = await get("SELECT * FROM servers WHERE id = ?", [serverId]);
     if (!serverRow) {
       ws.send(JSON.stringify({ type: "error", message: "Server not found" }));
       ws.close();
@@ -226,16 +218,22 @@ function init() {
 
     const sessionId = require("uuid").v4();
     const startedAt = new Date().toISOString();
-    db.prepare("INSERT INTO ssh_sessions (id, server_id, started_at, ended_at, duration) VALUES (?, ?, ?, NULL, NULL)")
-      .run(sessionId, serverId, startedAt);
+    await run("INSERT INTO ssh_sessions (id, server_id, started_at, ended_at, duration) VALUES (?, ?, ?, NULL, NULL)", [
+      sessionId,
+      serverId,
+      startedAt,
+    ]);
 
     const conn = new Client();
     let streamRef = null;
     let closed = false;
 
     conn.on("ready", () => {
-      db.prepare("UPDATE servers SET last_connected = ?, last_status = ? WHERE id = ?")
-        .run(new Date().toISOString(), "online", serverId);
+      run("UPDATE servers SET last_connected = ?, last_status = ? WHERE id = ?", [
+        new Date().toISOString(),
+        "online",
+        serverId,
+      ]).catch(() => {});
       ws.send(JSON.stringify({ type: "status", status: "connected" }));
       conn.shell({ term: "xterm-256color" }, (err, stream) => {
         if (err) {
@@ -260,7 +258,7 @@ function init() {
               lineBuffer = pieces.pop() || "";
               const latest = pieces.map((p) => p.trim()).filter(Boolean).pop();
               if (latest) {
-                recordTerminalHistory(serverId, latest, text, detected ? "failed" : "success");
+                recordTerminalHistory(serverId, latest, text, detected ? "failed" : "success").catch(() => {});
               }
             }
           }
@@ -277,7 +275,7 @@ function init() {
     });
 
     conn.on("error", (error) => {
-      db.prepare("UPDATE servers SET last_status = ? WHERE id = ?").run("offline", serverId);
+      run("UPDATE servers SET last_status = ? WHERE id = ?", ["offline", serverId]).catch(() => {});
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "error", message: error.message }));
         ws.close();
@@ -302,8 +300,11 @@ function init() {
       closed = true;
       const endedAt = Date.now();
       const duration = endedAt - new Date(startedAt).getTime();
-      db.prepare("UPDATE ssh_sessions SET ended_at = ?, duration = ? WHERE id = ?")
-        .run(new Date(endedAt).toISOString(), duration, sessionId);
+      run("UPDATE ssh_sessions SET ended_at = ?, duration = ? WHERE id = ?", [
+        new Date(endedAt).toISOString(),
+        duration,
+        sessionId,
+      ]).catch(() => {});
       if (streamRef) {
         try {
           streamRef.end();
@@ -323,9 +324,9 @@ function init() {
     }
   });
 
-  const server = httpServer.listen(port, host, () => {
+  const server = httpServer.listen(port, bindHost, () => {
     writeRuntimeFile(port);
-    appLogger.info(`oggo-server listening on http://${host}:${port}`);
+    appLogger.info(`oggo-server listening on http://${publicHost}:${port}`);
   });
 
   server.on("error", (error) => {
@@ -345,4 +346,7 @@ function init() {
   process.on("SIGINT", () => server.close(() => process.exit(0)));
 }
 
-init();
+init().catch((error) => {
+  console.error(`Server startup failed: ${error.message}`);
+  process.exit(1);
+});

@@ -20,17 +20,7 @@ cd oggo
 npm install
 ```
 
-## Step 3: Configuration
-
-Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and configure your settings. Most defaults are perfectly fine for local testing, but you should definitely change the `ENCRYPTION_SECRET` to a strong random string to secure your SSH passwords.
-
-## Step 4: Run the Server
+## Step 3: Run the Server
 
 You can run Oggo in development or production mode.
 
@@ -43,6 +33,19 @@ npm run dev
 ```bash
 npm start
 ```
+
+On first run, Oggo asks which database backend you want to use:
+
+- `SQLite` for simple local storage
+- `MySQL` for external database storage
+
+If you choose MySQL, Oggo asks for the details one by one during installation:
+
+- host / URL
+- port
+- username
+- password
+- database name
 
 ## Next Steps
 

@@ -10,6 +10,17 @@ const {
 const DEFAULT_CONFIG = {
   port: 3030,
   host: "localhost",
+  database: {
+    client: "sqlite",
+    sqlitePath: "",
+    mysql: {
+      host: "localhost",
+      port: 3306,
+      user: "",
+      password: "",
+      database: "",
+    },
+  },
   openBrowser: true,
   theme: "dark",
   password: "",
@@ -81,6 +92,9 @@ function loadConfig() {
   }
 
   const merged = deepMerge(DEFAULT_CONFIG, parsed);
+  if (!merged.database.sqlitePath) {
+    merged.database.sqlitePath = path.join(getoggoDataDir(), "oggo.db");
+  }
   fs.writeJSONSync(configPath, merged, { spaces: 2 });
   return merged;
 }

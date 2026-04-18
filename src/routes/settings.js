@@ -9,10 +9,10 @@ router.get("/", (req, res) => {
   return res.json({ data: loadConfig() });
 });
 
-router.put("/", (req, res) => {
+router.put("/", async (req, res) => {
   try {
     const saved = saveConfig(req.body || {});
-    reloadAllJobs(saved);
+    await reloadAllJobs(saved);
     return res.json({ data: saved });
   } catch (error) {
     return res.status(400).json({ error: error.message, code: "SETTINGS_SAVE_FAILED" });
@@ -29,9 +29,9 @@ router.post("/test-email", async (req, res) => {
   }
 });
 
-router.post("/reset", (req, res) => {
+router.post("/reset", async (req, res) => {
   const saved = saveConfig(DEFAULT_CONFIG);
-  reloadAllJobs(saved);
+  await reloadAllJobs(saved);
   return res.json({ data: saved });
 });
 
