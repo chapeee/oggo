@@ -23,7 +23,19 @@ router.get("/", async (req, res) => {
       }
       return { ...job, humanSchedule };
     });
-  return res.json({ data: jobs });
+  const s3Rows = await all("SELECT * FROM job_s3_settings");
+  const s3Map = new Map(s3Rows.map((row) => [row.job_id, row]));
+  const merged = jobs.map((job) => {
+    const s3 = s3Map.get(job.id);
+    return {
+      ...job,
+      s3UploadEnabled: Boolean(s3?.upload_enabled),
+      s3ConnectionId: s3?.connection_id || "",
+      s3UploadCondition: s3?.upload_condition || "failure",
+      s3FilePattern: s3?.file_pattern || "{job}-{timestamp}.log",
+    };
+  });
+  return res.json({ data: merged });
 });
 
 router.post("/", async (req, res) => {
@@ -53,6 +65,24 @@ router.post("/", async (req, res) => {
     INSERT INTO jobs (id, name, command, schedule, description, enabled, notify, created_at, updated_at, last_run, last_status)
     VALUES (@id, @name, @command, @schedule, @description, @enabled, @notify, @created_at, @updated_at, @last_run, @last_status)
   `, job);
+  await run(
+    `INSERT INTO job_s3_settings (job_id, upload_enabled, connection_id, upload_condition, file_pattern, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(job_id) DO UPDATE SET
+       upload_enabled=excluded.upload_enabled,
+       connection_id=excluded.connection_id,
+       upload_condition=excluded.upload_condition,
+       file_pattern=excluded.file_pattern,
+       updated_at=excluded.updated_at`,
+    [
+      job.id,
+      req.body.s3UploadEnabled ? 1 : 0,
+      req.body.s3ConnectionId || null,
+      req.body.s3UploadCondition || "failure",
+      req.body.s3FilePattern || "{job}-{timestamp}.log",
+      now,
+    ]
+  );
 
   await upsertJobSchedules(job, loadConfig());
   return res.status(201).json({ data: job });
@@ -89,6 +119,24 @@ router.put("/:id", async (req, res) => {
         enabled = @enabled, notify = @notify, updated_at = @updated_at
     WHERE id = @id
   `, updated);
+  await run(
+    `INSERT INTO job_s3_settings (job_id, upload_enabled, connection_id, upload_condition, file_pattern, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(job_id) DO UPDATE SET
+       upload_enabled=excluded.upload_enabled,
+       connection_id=excluded.connection_id,
+       upload_condition=excluded.upload_condition,
+       file_pattern=excluded.file_pattern,
+       updated_at=excluded.updated_at`,
+    [
+      id,
+      req.body.s3UploadEnabled ? 1 : 0,
+      req.body.s3ConnectionId || null,
+      req.body.s3UploadCondition || "failure",
+      req.body.s3FilePattern || "{job}-{timestamp}.log",
+      updated.updated_at,
+    ]
+  );
 
   await upsertJobSchedules(updated, loadConfig());
   return res.json({ data: updated });
@@ -100,6 +148,7 @@ router.delete("/:id", async (req, res) => {
   if (!result.changes) {
     return res.status(404).json({ error: "Job not found", code: "NOT_FOUND" });
   }
+  await run("DELETE FROM job_s3_settings WHERE job_id = ?", [id]);
   await deleteJobSchedules(id);
   return res.json({ message: "Job deleted" });
 });

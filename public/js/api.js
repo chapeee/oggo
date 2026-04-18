@@ -139,6 +139,188 @@ const API = {
   deleteSnippet(id) {
     return this.request(`/api/terminal/snippets/${id}`, { method: "DELETE" });
   },
+  getS3Regions() {
+    return this.request("/api/s3/regions");
+  },
+  getS3Connections() {
+    return this.request("/api/s3/connections");
+  },
+  createS3Connection(payload) {
+    return this.request("/api/s3/connections", { method: "POST", body: JSON.stringify(payload) });
+  },
+  updateS3Connection(id, payload) {
+    return this.request(`/api/s3/connections/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+  },
+  deleteS3Connection(id) {
+    return this.request(`/api/s3/connections/${id}`, { method: "DELETE" });
+  },
+  testS3Connection(id) {
+    return this.request(`/api/s3/connections/${id}/test`, { method: "POST" });
+  },
+  testS3DraftConnection(payload) {
+    return this.request("/api/s3/connections/test", { method: "POST", body: JSON.stringify(payload) });
+  },
+  listS3Files(id, params = {}) {
+    const safeParams = Object.fromEntries(
+      Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")
+    );
+    const q = new URLSearchParams(safeParams);
+    return this.request(`/api/s3/connections/${id}/files?${q.toString()}`);
+  },
+  uploadS3File(id, payload) {
+    return this.request(`/api/s3/connections/${id}/upload`, { method: "POST", body: JSON.stringify(payload) });
+  },
+  createS3Folder(id, path) {
+    return this.request(`/api/s3/connections/${id}/folders`, { method: "POST", body: JSON.stringify({ path }) });
+  },
+  deleteS3File(id, key) {
+    const q = new URLSearchParams({ key });
+    return this.request(`/api/s3/connections/${id}/files?${q.toString()}`, { method: "DELETE" });
+  },
+  getS3PresignedUrl(id, key, expiresIn = 3600) {
+    const q = new URLSearchParams({ key, expiresIn: String(expiresIn) });
+    return this.request(`/api/s3/connections/${id}/presign?${q.toString()}`);
+  },
+  getAwsRegions() {
+    return this.request("/api/aws/regions");
+  },
+  getAwsConnections() {
+    return this.request("/api/aws/connections");
+  },
+  createAwsConnection(payload) {
+    return this.request("/api/aws/connections", { method: "POST", body: JSON.stringify(payload) });
+  },
+  updateAwsConnection(id, payload) {
+    return this.request(`/api/aws/connections/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+  },
+  deleteAwsConnection(id) {
+    return this.request(`/api/aws/connections/${id}`, { method: "DELETE" });
+  },
+  testAwsConnection(id) {
+    return this.request(`/api/aws/connections/${id}/test`, { method: "POST" });
+  },
+  getAwsIamHelper() {
+    return this.request("/api/aws/iam-helper");
+  },
+  listCloudWatchLogGroups(connectionId, params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/aws/connections/${connectionId}/cloudwatch/log-groups?${q.toString()}`);
+  },
+  listRdsInstances(connectionId, params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/aws/connections/${connectionId}/rds/instances?${q.toString()}`);
+  },
+  listEc2Instances(connectionId, params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/aws/connections/${connectionId}/ec2/instances?${q.toString()}`);
+  },
+  listLambdaFunctions(connectionId, params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/aws/connections/${connectionId}/lambda/functions?${q.toString()}`);
+  },
+  listAwsSecrets(connectionId, params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/aws/connections/${connectionId}/secrets?${q.toString()}`);
+  },
+  listSslMonitors() {
+    return this.request("/api/devtools/ssl");
+  },
+  createSslMonitor(payload) {
+    return this.request("/api/devtools/ssl", { method: "POST", body: JSON.stringify(payload) });
+  },
+  checkSslMonitor(id) {
+    return this.request(`/api/devtools/ssl/${id}/check`, { method: "POST" });
+  },
+  checkSslNow(payload) {
+    return this.request("/api/devtools/ssl/check-now", { method: "POST", body: JSON.stringify(payload) });
+  },
+  deleteSslMonitor(id) {
+    return this.request(`/api/devtools/ssl/${id}`, { method: "DELETE" });
+  },
+  listDnsMonitors() {
+    return this.request("/api/devtools/dns");
+  },
+  createDnsMonitor(payload) {
+    return this.request("/api/devtools/dns", { method: "POST", body: JSON.stringify(payload) });
+  },
+  checkDnsMonitor(id) {
+    return this.request(`/api/devtools/dns/${id}/check`, { method: "POST" });
+  },
+  dnsLookup(payload) {
+    return this.request("/api/devtools/dns/lookup", { method: "POST", body: JSON.stringify(payload) });
+  },
+  deleteDnsMonitor(id) {
+    return this.request(`/api/devtools/dns/${id}`, { method: "DELETE" });
+  },
+  listPortMonitors() {
+    return this.request("/api/devtools/ports");
+  },
+  createPortMonitor(payload) {
+    return this.request("/api/devtools/ports", { method: "POST", body: JSON.stringify(payload) });
+  },
+  checkPortMonitor(id) {
+    return this.request(`/api/devtools/ports/${id}/check`, { method: "POST" });
+  },
+  deletePortMonitor(id) {
+    return this.request(`/api/devtools/ports/${id}`, { method: "DELETE" });
+  },
+  listEnvVars() {
+    return this.request("/api/devtools/env");
+  },
+  createEnvVar(payload) {
+    return this.request("/api/devtools/env", { method: "POST", body: JSON.stringify(payload) });
+  },
+  deleteEnvVar(id) {
+    return this.request(`/api/devtools/env/${id}`, { method: "DELETE" });
+  },
+  listHttpChecks() {
+    return this.request("/api/devtools/http-checks");
+  },
+  createHttpCheck(payload) {
+    return this.request("/api/devtools/http-checks", { method: "POST", body: JSON.stringify(payload) });
+  },
+  runHttpCheck(id) {
+    return this.request(`/api/devtools/http-checks/${id}/check`, { method: "POST" });
+  },
+  deleteHttpCheck(id) {
+    return this.request(`/api/devtools/http-checks/${id}`, { method: "DELETE" });
+  },
+  scanPackages(serverId, manager = "") {
+    const q = new URLSearchParams();
+    if (manager) q.set("manager", manager);
+    return this.request(`/api/software/package-manager/${serverId}/scan?${q.toString()}`);
+  },
+  packageOperation(serverId, payload) {
+    return this.request(`/api/software/package-manager/${serverId}/operate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  pinPackage(serverId, payload) {
+    return this.request(`/api/software/package-manager/${serverId}/pin`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  unpinPackage(serverId, payload) {
+    return this.request(`/api/software/package-manager/${serverId}/pin`, {
+      method: "DELETE",
+      body: JSON.stringify(payload),
+    });
+  },
+  packageHistory(serverId, limit = 200) {
+    return this.request(`/api/software/package-manager/${serverId}/history?limit=${Number(limit || 200)}`);
+  },
+  packageVulnerabilities(serverId, params) {
+    const q = new URLSearchParams(params || {});
+    return this.request(`/api/software/package-manager/${serverId}/vulnerabilities?${q.toString()}`);
+  },
+  runInstaller(serverId, payload) {
+    return this.request(`/api/software/installer/${serverId}/install`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
 };
 
 window.OggoAPI = API;

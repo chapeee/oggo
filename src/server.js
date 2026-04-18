@@ -18,6 +18,11 @@ const settingsRouter = require("./routes/settings");
 const serversRouter = require("./routes/servers");
 const keysRouter = require("./routes/keys");
 const terminalRouter = require("./routes/terminal");
+const s3Router = require("./routes/s3");
+const awsRouter = require("./routes/aws");
+const devToolsRouter = require("./routes/devtools");
+const { errorHandler } = require("./middleware/error-handler");
+const softwareRouter = require("./routes/software");
 const {
   ensureBuiltinSnippets,
   recordTerminalHistory,
@@ -37,12 +42,6 @@ function writeRuntimeFile(port) {
     },
     { spaces: 2 }
   );
-}
-
-function createApiErrorHandler(err, req, res, next) {
-  if (res.headersSent) return next(err);
-  appLogger.error(err.stack || err.message);
-  return res.status(500).json({ error: err.message || "Internal server error", code: "INTERNAL_ERROR" });
 }
 
 async function init() {
@@ -102,6 +101,10 @@ async function init() {
   app.use("/api/servers", serversRouter);
   app.use("/api/keys", keysRouter);
   app.use("/api/terminal", terminalRouter);
+  app.use("/api/s3", s3Router);
+  app.use("/api/aws", awsRouter);
+  app.use("/api/devtools", devToolsRouter);
+  app.use("/api/software", softwareRouter);
 
   app.post("/api/server/restart", (req, res) => {
     res.json({ message: "Restarting server in background..." });
@@ -192,7 +195,7 @@ async function init() {
     res.sendFile(path.join(__dirname, "..", "public", "index.html"));
   });
 
-  app.use(createApiErrorHandler);
+  app.use(errorHandler);
 
   const port = Number(process.env.PORT || config.port || 3030);
   const configuredHost = process.env.HOST || config.host || "0.0.0.0";
