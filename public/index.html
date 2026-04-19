@@ -41,10 +41,15 @@
 
       <main class="flex-1">
         <header class="h-16 border-b border-gray-200 dark:border-gray-800 px-4 flex items-center justify-between bg-white dark:bg-[#111118]">
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-3">
             <span id="top-breadcrumb" class="text-sm text-gray-500 dark:text-gray-400">Dashboard / Dashboard</span>
+            <select id="top-workspace-switcher" class="hidden input !py-1 !px-2 text-xs min-w-[180px]"></select>
           </div>
           <div class="flex items-center space-x-4">
+            <button id="global-search-btn" class="text-gray-500 hover:text-orange-500 transition-colors inline-flex items-center gap-1 text-xs" title="Search (Ctrl+K / Cmd+K)">
+              <i data-lucide="search" class="w-4 h-4"></i>
+              <span class="hidden md:inline">Ctrl+K</span>
+            </button>
             <button id="server-restart-btn" class="text-gray-500 hover:text-orange-500 transition-colors" title="Restart Server">
               <i data-lucide="rotate-cw" class="w-5 h-5"></i>
             </button>
@@ -69,6 +74,22 @@
     </div>
 
     <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
+    <div id="global-search-overlay" class="hidden fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm p-4 flex items-start justify-center">
+      <div class="w-full max-w-2xl mt-20 bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+        <div class="p-3 border-b border-gray-200 dark:border-gray-700">
+          <input
+            id="global-search-input"
+            class="w-full input"
+            placeholder="Search jobs, servers, workspaces, settings..."
+          />
+        </div>
+        <div id="global-search-results" class="max-h-[60vh] overflow-auto p-3 text-sm"></div>
+        <div class="px-3 py-2 border-t border-gray-200 dark:border-gray-700 text-[11px] text-gray-500 dark:text-gray-400 flex items-center justify-between">
+          <span>Use ↑ ↓ to navigate, Enter to open</span>
+          <span>Esc to close</span>
+        </div>
+      </div>
+    </div>
 
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/cronstrue@latest/dist/cronstrue.min.js"></script>

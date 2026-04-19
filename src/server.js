@@ -7,12 +7,14 @@ const cors = require("cors");
 const WebSocket = require("ws");
 const { Client } = require("ssh2");
 const { loadConfig, ensureFirstRunPaths, getConfigFilePath } = require("./config/configLoader");
-const { initializeDatabase, get, all, run } = require("./db/database");
+const { initializeDatabase, get, run } = require("./db/database");
 const { appLogger } = require("./services/logService");
 const { reloadAllJobs, getScheduledCount } = require("./services/cronService");
 const { buildConnectConfig } = require("./services/sshService");
 const { getDbPath, getRuntimePath } = require("./services/platformService");
+const { apiAuthMiddleware } = require("./middleware/auth");
 const jobsRouter = require("./routes/jobs");
+const dashboardRouter = require("./routes/dashboard");
 const logsRouter = require("./routes/logs");
 const settingsRouter = require("./routes/settings");
 const serversRouter = require("./routes/servers");
@@ -20,6 +22,8 @@ const keysRouter = require("./routes/keys");
 const terminalRouter = require("./routes/terminal");
 const s3Router = require("./routes/s3");
 const awsRouter = require("./routes/aws");
+const workspacesRouter = require("./routes/workspaces");
+const searchRouter = require("./routes/search");
 const devToolsRouter = require("./routes/devtools");
 const { errorHandler } = require("./middleware/error-handler");
 const softwareRouter = require("./routes/software");
@@ -29,6 +33,7 @@ const {
   detectError,
 } = require("./services/commandIntelService");
 const { initializeTldrIndex, shouldUpdate } = require("./services/tldrService");
+const { buildSearchIndex } = require("./services/searchService");
 
 const app = express();
 
@@ -51,6 +56,14 @@ async function init() {
 
   await initializeDatabase();
   await ensureBuiltinSnippets();
+  await buildSearchIndex().catch((error) => {
+    appLogger.warn(`Search index init failed: ${error.message}`);
+  });
+  setInterval(() => {
+    buildSearchIndex().catch((error) => {
+      appLogger.warn(`Search index refresh failed: ${error.message}`);
+    });
+  }, 1000 * 60);
   initializeTldrIndex().then((commands) => {
     appLogger.info(`TLDR index ready with ${commands.length} commands`);
   }).catch((error) => {
@@ -84,17 +97,9 @@ async function init() {
     res.json({ ok: true, service: "oggo", scheduledJobs: getScheduledCount() });
   });
 
-  // Lightweight password protection for local API usage.
-  app.use("/api", (req, res, next) => {
-    const latestConfig = loadConfig();
-    if (!latestConfig.passwordEnabled || !latestConfig.password) return next();
-    const supplied = req.header("x-oggo-password") || req.query.password;
-    if (supplied !== latestConfig.password) {
-      return res.status(401).json({ error: "Unauthorized", code: "UNAUTHORIZED" });
-    }
-    return next();
-  });
+  app.use("/api", apiAuthMiddleware);
 
+  app.use("/api/dashboard", dashboardRouter);
   app.use("/api/jobs", jobsRouter);
   app.use("/api/logs", logsRouter);
   app.use("/api/settings", settingsRouter);
@@ -103,6 +108,8 @@ async function init() {
   app.use("/api/terminal", terminalRouter);
   app.use("/api/s3", s3Router);
   app.use("/api/aws", awsRouter);
+  app.use("/api/workspaces", workspacesRouter);
+  app.use("/api/search", searchRouter);
   app.use("/api/devtools", devToolsRouter);
   app.use("/api/software", softwareRouter);
 
@@ -128,66 +135,6 @@ async function init() {
       });
       child.unref();
     }, 1000);
-  });
-
-  app.get("/api/dashboard", async (req, res) => {
-    const totals = await get(
-      `
-          SELECT
-            COUNT(*) as totalJobs,
-            SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as activeJobs
-          FROM jobs
-        `
-    );
-
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const startOfDay = today.toISOString();
-
-    const failedToday = (await get("SELECT COUNT(*) as count FROM logs WHERE status = 'failed' AND created_at >= ?", [startOfDay]))?.count || 0;
-
-    const successRateData = await get(
-      `
-          SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success
-          FROM logs
-          WHERE created_at >= ?
-        `,
-      [startOfDay]
-    );
-
-    const successRate = successRateData.total
-      ? Math.round((100 * (successRateData.success || 0)) / successRateData.total)
-      : 100;
-
-    const recentActivity = await all("SELECT * FROM logs ORDER BY created_at DESC LIMIT 10");
-
-    const last7Days = new Date();
-    last7Days.setDate(last7Days.getDate() - 6);
-    last7Days.setUTCHours(0, 0, 0, 0);
-
-    const logsLast7Days = await all(`
-      SELECT 
-        SUBSTRING(created_at, 1, 10) as log_date,
-        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
-        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
-      FROM logs
-      WHERE created_at >= ?
-      GROUP BY log_date
-      ORDER BY log_date ASC
-    `, [last7Days.toISOString()]);
-
-    res.json({
-      data: {
-        totalJobs: totals.totalJobs || 0,
-        activeJobs: totals.activeJobs || 0,
-        failedToday,
-        successRate,
-        recentActivity,
-        chartData: logsLast7Days,
-      },
-    });
   });
 
   app.use(express.static(path.join(__dirname, "..", "public")));

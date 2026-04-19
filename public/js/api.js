@@ -222,6 +222,43 @@ const API = {
     const q = new URLSearchParams(params);
     return this.request(`/api/aws/connections/${connectionId}/secrets?${q.toString()}`);
   },
+  getWorkspaces() {
+    return this.request("/api/workspaces");
+  },
+  createWorkspace(payload) {
+    return this.request("/api/workspaces", { method: "POST", body: JSON.stringify(payload) });
+  },
+  getWorkspace(id) {
+    return this.request(`/api/workspaces/${id}`);
+  },
+  updateWorkspace(id, payload) {
+    return this.request(`/api/workspaces/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+  },
+  deleteWorkspace(id) {
+    return this.request(`/api/workspaces/${id}`, { method: "DELETE" });
+  },
+  getWorkspaceServices(id) {
+    return this.request(`/api/workspaces/${id}/services`);
+  },
+  attachWorkspaceService(id, type, payload) {
+    return this.request(`/api/workspaces/${id}/${type}`, { method: "POST", body: JSON.stringify(payload) });
+  },
+  detachWorkspaceService(id, type, serviceId) {
+    const q = new URLSearchParams({ type });
+    return this.request(`/api/workspaces/${id}/services/${serviceId}?${q.toString()}`, { method: "DELETE" });
+  },
+  search(query, options = {}) {
+    const params = new URLSearchParams();
+    if (query !== undefined && query !== null) params.set("q", query);
+    if (options.workspaceId) params.set("workspaceId", options.workspaceId);
+    if (options.maxPerGroup) params.set("maxPerGroup", String(options.maxPerGroup));
+    return this.request(`/api/search?${params.toString()}`);
+  },
+  getSearchIndex(rebuild = false) {
+    const q = new URLSearchParams();
+    if (rebuild) q.set("rebuild", "true");
+    return this.request(`/api/search/index?${q.toString()}`);
+  },
   listSslMonitors() {
     return this.request("/api/devtools/ssl");
   },

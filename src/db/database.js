@@ -256,6 +256,86 @@ function getSchemaStatements(targetEngine) {
         last_error TEXT,
         created_at VARCHAR(64)
       )`,
+      `CREATE TABLE IF NOT EXISTS workspaces (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        color VARCHAR(32),
+        default_region VARCHAR(64) DEFAULT 'us-east-1',
+        created_at VARCHAR(64),
+        updated_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_aws_connections (
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64) NOT NULL,
+        is_primary TINYINT(1) DEFAULT 0,
+        PRIMARY KEY (workspace_id, aws_connection_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_s3_configs (
+        workspace_id VARCHAR(64) NOT NULL,
+        s3_config_id VARCHAR(64) NOT NULL,
+        PRIMARY KEY (workspace_id, s3_config_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_sns_topics (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        topic_name VARCHAR(255) NOT NULL,
+        topic_arn TEXT,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_ses_identities (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        identity VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_cloudwatch_groups (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        name VARCHAR(255) NOT NULL,
+        log_group_prefix TEXT,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_rds_instances (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        instance_identifier VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_ec2_instances (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        instance_id VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        linked_server_id VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_lambda_functions (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        function_name VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_secrets (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        secret_name VARCHAR(255) NOT NULL,
+        secret_arn TEXT,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
       `CREATE TABLE IF NOT EXISTS package_pins (
         id VARCHAR(64) PRIMARY KEY,
         server_id VARCHAR(64) NOT NULL,
@@ -516,6 +596,86 @@ function getSchemaStatements(targetEngine) {
       last_status_code INTEGER,
       last_checked_at TEXT,
       last_error TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      default_region TEXT DEFAULT 'us-east-1',
+      created_at TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_aws_connections (
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT NOT NULL,
+      is_primary INTEGER DEFAULT 0,
+      PRIMARY KEY (workspace_id, aws_connection_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_s3_configs (
+      workspace_id TEXT NOT NULL,
+      s3_config_id TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, s3_config_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_sns_topics (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      topic_name TEXT NOT NULL,
+      topic_arn TEXT,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_ses_identities (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      identity TEXT NOT NULL,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_cloudwatch_groups (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      name TEXT NOT NULL,
+      log_group_prefix TEXT,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_rds_instances (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      instance_identifier TEXT NOT NULL,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_ec2_instances (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      instance_id TEXT NOT NULL,
+      region TEXT,
+      linked_server_id TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_lambda_functions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      function_name TEXT NOT NULL,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_secrets (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      secret_name TEXT NOT NULL,
+      secret_arn TEXT,
+      region TEXT,
       created_at TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS package_pins (

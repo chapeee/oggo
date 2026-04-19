@@ -10,7 +10,7 @@ const state = {
     software: "software-package-manager",
     storage: "s3",
     "developer-tools": "health-checks",
-    aws: "aws-connections",
+    aws: "workspaces",
     settings: "settings",
   },
   jobs: [],
@@ -29,6 +29,21 @@ const state = {
   awsRegions: [],
   awsActiveConnectionId: "",
   awsViewData: [],
+  workspaces: [],
+  activeWorkspaceId: "",
+  workspaceDetail: null,
+  workspaceSwitcherOpen: false,
+  globalSearch: {
+    open: false,
+    query: "",
+    selectedIndex: 0,
+    flatResults: [],
+    groupedResults: [],
+    indexBuiltAt: null,
+    indexItems: [],
+    recent: JSON.parse(localStorage.getItem("oggo.globalSearch.recent") || "[]"),
+    pinned: JSON.parse(localStorage.getItem("oggo.globalSearch.pinned") || "[]"),
+  },
   sslMonitors: [],
   dnsMonitors: [],
   portMonitors: [],
@@ -83,7 +98,7 @@ const NAV_STRUCTURE = {
     items: [
       { view: "servers", label: "All Servers", icon: "server", badge: () => `${state.servers.filter((s) => s.last_status === "online").length} online` },
       { view: "terminal", label: "SSH Terminal", icon: "terminal" },
-      { view: "servers", label: "All Clients", icon: "users", badge: () => String(state.servers.length || 0) },
+      { view: "servers", label: "Server Inventory", icon: "users", badge: () => String(state.servers.length || 0) },
       { action: "add-server", label: "Add Server", icon: "plus-circle", secondary: true },
     ],
   },
@@ -124,16 +139,7 @@ const NAV_STRUCTURE = {
   },
   aws: {
     title: "AWS Services",
-    items: [
-      { view: "aws-connections", label: "Connections", icon: "key-round", badge: () => (state.awsConnections.length ? String(state.awsConnections.length) : "setup") },
-      { view: "s3", label: "S3 Browser", icon: "folder-open" },
-      { view: "aws-cloudwatch", label: "CloudWatch Logs", icon: "scroll-text" },
-      { view: "aws-rds", label: "RDS Databases", icon: "database-zap" },
-      { view: "aws-ec2", label: "EC2 Instances", icon: "server-cog" },
-      { view: "aws-lambda", label: "Lambda Functions", icon: "function-square" },
-      { view: "aws-connections", label: "SES / SNS", icon: "bell-ring" },
-      { view: "aws-secrets", label: "Secrets Manager", icon: "vault" },
-    ],
+    items: [],
   },
   settings: {
     title: "Settings",
@@ -165,6 +171,8 @@ const VIEW_TO_SECTION = {
   "port-scanner": "developer-tools",
   "env-vars": "developer-tools",
   "aws-connections": "aws",
+  workspaces: "aws",
+  "workspace-detail": "aws",
   "aws-cloudwatch": "aws",
   "aws-rds": "aws",
   "aws-ec2": "aws",
@@ -244,6 +252,19 @@ function statusBadge(status) {
   return `<span class="px-2 py-1 rounded-full text-xs ${map[status] || map.never}">${status || "never"}</span>`;
 }
 
+function updateTopWorkspaceSwitcher() {
+  const switcher = el("top-workspace-switcher");
+  if (!switcher) return;
+  const show =
+    state.navSection === "aws" &&
+    ["workspaces", "workspace-detail", "s3-browser", "aws-cloudwatch", "aws-rds", "aws-ec2", "aws-lambda", "aws-secrets"].includes(state.view);
+  switcher.classList.toggle("hidden", !show);
+  if (!show) return;
+  switcher.innerHTML = (state.workspaces || [])
+    .map((workspace) => `<option value="${workspace.id}" ${workspace.id === state.activeWorkspaceId ? "selected" : ""}>${workspace.name}</option>`)
+    .join("");
+}
+
 function activateNav() {
   state.navSection = VIEW_TO_SECTION[state.view] || state.navSection || "dashboard";
   renderNavContext();
@@ -253,9 +274,15 @@ function activateNav() {
   const breadcrumb = el("top-breadcrumb");
   if (breadcrumb) {
     const sectionTitle = NAV_STRUCTURE[state.navSection]?.title || "Section";
-    const item = (NAV_STRUCTURE[state.navSection]?.items || []).find((i) => i.view === state.view);
+    const items = state.navSection === "aws" ? getAwsContextItems() : NAV_STRUCTURE[state.navSection]?.items || [];
+    const item = items.find(
+      (entry) =>
+        (entry.workspaceId && state.view === "workspace-detail" && entry.workspaceId === state.activeWorkspaceId) ||
+        (!entry.workspaceId && entry.view === state.view)
+    );
     breadcrumb.textContent = `${sectionTitle} / ${item?.label || state.view}`;
   }
+  updateTopWorkspaceSwitcher();
   updateRailStatusDots();
 }
 
@@ -281,24 +308,50 @@ function updateRailStatusDots() {
   }
 }
 
+function getAwsContextItems() {
+  const workspaceItems = (state.workspaces || []).map((workspace) => ({
+    view: "workspace-detail",
+    workspaceId: workspace.id,
+    label: workspace.name,
+    icon: "circle",
+    iconClass: "text-xs",
+    color: workspace.color || "#f97316",
+    badge: workspace.total_services ? String(workspace.total_services) : "",
+  }));
+  return [
+    { view: "workspaces", label: "All Workspaces", icon: "folders", badge: String(state.workspaces.length || 0) },
+    ...workspaceItems,
+    { view: "aws-connections", label: "AWS Connections", icon: "key-round", badge: state.awsConnections.length ? String(state.awsConnections.length) : "setup" },
+    { action: "new-workspace", label: "New Workspace", icon: "plus-circle", secondary: true },
+  ];
+}
+
 function renderNavContext() {
   const context = el("nav-context");
   const titleNode = el("context-title");
   const listNode = el("context-list");
   if (!context || !titleNode || !listNode) return;
   const section = NAV_STRUCTURE[state.navSection] || NAV_STRUCTURE.dashboard;
+  const items = state.navSection === "aws" ? getAwsContextItems() : section.items;
   titleNode.textContent = section.title.toUpperCase();
   context.classList.toggle("collapsed", state.contextCollapsed);
 
-  listNode.innerHTML = section.items
+  listNode.innerHTML = items
     .map((item) => {
-      const isActive = item.view === state.view;
+      const isActive =
+        (item.workspaceId && state.view === "workspace-detail" && state.activeWorkspaceId === item.workspaceId) ||
+        (!item.workspaceId && item.view === state.view);
       const badge = typeof item.badge === "function" ? item.badge() : item.badge;
+      const icon = item.workspaceId
+        ? `<span class="inline-flex w-2 h-2 rounded-full" style="background:${item.color || "#f97316"}"></span>`
+        : `<i data-lucide="${item.icon}" class="w-4 h-4 ${item.iconClass || ""}"></i>`;
       return `
         <button class="context-item ${isActive ? "active" : ""} ${item.secondary ? "opacity-85" : ""}" ${
           item.view ? `data-context-view="${item.view}"` : ""
-        } ${item.action ? `data-context-action="${item.action}"` : ""}>
-          <span class="flex items-center gap-2"><i data-lucide="${item.icon}" class="w-4 h-4"></i>${item.label}</span>
+        } ${item.action ? `data-context-action="${item.action}"` : ""} ${
+          item.workspaceId ? `data-context-workspace-id="${item.workspaceId}"` : ""
+        }>
+          <span class="flex items-center gap-2">${icon}${item.label}</span>
           ${badge ? `<span class="badge">${badge}</span>` : ""}
         </button>
       `;
@@ -791,26 +844,30 @@ function s3BrowserHtml() {
     .map((folder) => {
       const label = folder.key.replace(state.s3Browser.prefix || "", "").replace(/\/$/, "") || "/";
       return `
-      <div data-s3-folder-open="${folder.key}" class="s3-card s3-folder-card group text-left bg-white dark:bg-[#1a1f2d] border border-gray-200 dark:border-gray-700 rounded-xl p-3 hover:border-orange-400 transition cursor-pointer">
-        <div class="s3-thumb rounded-lg bg-amber-600/10 flex items-center justify-center mb-3">
-          <i data-lucide="folder" class="w-9 h-9 text-amber-300"></i>
+      <div data-s3-folder-open="${folder.key}" class="s3-card s3-folder-card group relative text-left bg-white dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700/60 rounded-lg p-2.5 hover:bg-gray-50 dark:hover:bg-gray-800 hover:border-orange-500/50 transition-all cursor-pointer">
+        <div class="aspect-[4/3] rounded-md bg-gray-50 dark:bg-gray-900/50 flex items-center justify-center mb-2 border border-gray-100 dark:border-gray-800 group-hover:bg-orange-50/50 dark:group-hover:bg-orange-500/5 transition-colors">
+          <i data-lucide="folder" class="w-10 h-10 text-amber-400/70 group-hover:text-amber-400 transition-colors fill-amber-400/10 group-hover:fill-amber-400/20"></i>
         </div>
-        <div class="text-sm font-medium truncate">${escapeHtml(label)}</div>
-        <div class="text-xs text-gray-500">Folder</div>
+        <div class="px-1">
+          <div class="text-sm font-medium text-gray-900 dark:text-gray-200 truncate group-hover:text-orange-500 transition-colors">${escapeHtml(label)}</div>
+          <div class="text-xs text-gray-500 mt-0.5">Folder</div>
+        </div>
       </div>`;
     })
     .join("");
   const uploadCards = uploads
     .map((u) => `
-      <div class="s3-card bg-white dark:bg-[#1a1f2d] border border-orange-400/50 rounded-xl p-3">
-        <div class="s3-thumb rounded-lg bg-orange-500/10 flex items-center justify-center mb-3 relative overflow-hidden">
-          <i data-lucide="upload-cloud" class="w-8 h-8 text-orange-300"></i>
-          <div class="absolute left-0 right-0 bottom-0 h-1.5 bg-black/20"><span class="block h-full bg-orange-500" style="width:${Math.min(100, Math.max(0, u.progress || 0))}%"></span></div>
+      <div class="s3-card bg-white dark:bg-gray-800/40 border border-orange-400/50 rounded-lg p-2.5 relative overflow-hidden">
+        <div class="absolute left-0 top-0 bottom-0 w-1 bg-orange-500" style="height:${Math.min(100, Math.max(0, u.progress || 0))}%"></div>
+        <div class="aspect-[4/3] rounded-md bg-orange-50 dark:bg-orange-500/5 flex items-center justify-center mb-2 border border-orange-100 dark:border-orange-500/10">
+          <i data-lucide="upload-cloud" class="w-10 h-10 text-orange-400/70 animate-pulse"></i>
         </div>
-        <div class="text-sm font-medium truncate">${escapeHtml(u.name)}</div>
-        <div class="text-xs text-gray-500 flex justify-between">
-          <span>${u.status === "failed" ? "Failed" : `${Math.round(u.progress || 0)}%`}</span>
-          <span>${formatBytes(u.size)}</span>
+        <div class="px-1">
+          <div class="text-sm font-medium text-gray-900 dark:text-gray-200 truncate">${escapeHtml(u.name)}</div>
+          <div class="flex items-center justify-between text-xs text-gray-500 mt-0.5">
+            <span class="text-orange-500 font-medium">${u.status === "failed" ? "Failed" : `${Math.round(u.progress || 0)}%`}</span>
+            <span>${formatBytes(u.size)}</span>
+          </div>
         </div>
       </div>`)
     .join("");
@@ -820,54 +877,66 @@ function s3BrowserHtml() {
       const visual = getS3TypeVisual(file);
       const selected = state.s3Browser.selectedKeys.includes(file.key);
       return `
-      <div class="s3-card s3-file-card group relative bg-white dark:bg-[#1a1f2d] border ${selected ? "border-orange-500 ring-1 ring-orange-500/40 s3-selected" : "border-gray-200 dark:border-gray-700"} rounded-xl p-3 transition cursor-pointer" data-s3-row-select="${file.key}">
-        <label class="absolute top-2 left-2 z-20 s3-select-checkbox">
-          <input type="checkbox" class="accent-orange-500" data-s3-select="${file.key}" ${selected ? "checked" : ""} />
+      <div class="s3-card s3-file-card group relative bg-white dark:bg-gray-800/40 border ${selected ? "border-orange-500 bg-orange-50/50 dark:bg-orange-500/5 ring-1 ring-orange-500/40 s3-selected" : "border-gray-200 dark:border-gray-700/60"} rounded-lg p-2.5 hover:border-gray-300 dark:hover:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800 transition-all cursor-pointer" data-s3-row-select="${file.key}">
+        <label class="absolute top-3 left-3 z-20 s3-select-checkbox opacity-0 group-hover:opacity-100 transition-opacity ${selected ? "opacity-100" : ""}">
+          <input type="checkbox" class="w-4 h-4 rounded border-gray-300 text-orange-500 focus:ring-orange-500 bg-white dark:bg-gray-800" data-s3-select="${file.key}" ${selected ? "checked" : ""} />
         </label>
-        <div class="s3-thumb rounded-lg ${visual.bgClass} flex items-center justify-center mb-3 relative overflow-hidden">
+        <div class="aspect-[4/3] rounded-md ${visual.bgClass} flex items-center justify-center mb-2 relative overflow-hidden border border-gray-100 dark:border-gray-800">
           ${
             file.category === "images"
               ? `<div class="s3-thumb-skeleton absolute inset-0"></div>
                  <img data-s3-thumb="${file.key}" alt="${escapeHtml(file.name)}" class="w-full h-full object-cover opacity-0 transition-opacity" loading="lazy" />
-                 <div data-s3-thumb-fallback class="text-xl font-semibold uppercase">${escapeHtml(ext || "img")}</div>`
-              : `<i data-lucide="${visual.icon}" class="w-9 h-9"></i>`
+                 <div data-s3-thumb-fallback class="text-xl font-bold uppercase tracking-wider text-gray-400/50 dark:text-gray-500/50">${escapeHtml(ext || "IMG")}</div>`
+              : `<i data-lucide="${visual.icon}" class="w-10 h-10 opacity-70"></i>`
           }
-          <span class="absolute bottom-1 left-1 text-[10px] px-1.5 py-0.5 rounded uppercase ${visual.badgeClass}">${escapeHtml(visual.badgeText)}</span>
-          <div class="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-2">
-            <button data-s3-preview="${file.key}" class="p-1.5 rounded bg-white/20 hover:bg-white/30"><i data-lucide="eye" class="w-4 h-4 text-white"></i></button>
-            <button data-s3-download="${file.key}" class="p-1.5 rounded bg-white/20 hover:bg-white/30"><i data-lucide="download" class="w-4 h-4 text-white"></i></button>
-            <button data-s3-delete-file="${file.key}" class="p-1.5 rounded bg-red-500/70 hover:bg-red-500"><i data-lucide="trash-2" class="w-4 h-4 text-white"></i></button>
+          <div class="absolute inset-0 bg-gray-900/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 backdrop-blur-[1px]">
+            <button data-s3-preview="${file.key}" class="p-1.5 rounded-md bg-white/20 hover:bg-white/30 text-white transition-colors" title="Preview"><i data-lucide="eye" class="w-4 h-4"></i></button>
+            <button data-s3-download="${file.key}" class="p-1.5 rounded-md bg-white/20 hover:bg-white/30 text-white transition-colors" title="Download"><i data-lucide="download" class="w-4 h-4"></i></button>
+            <button data-s3-delete-file="${file.key}" class="p-1.5 rounded-md bg-red-500/80 hover:bg-red-500 text-white transition-colors" title="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
           </div>
         </div>
-        <div class="text-sm font-medium truncate" title="${escapeHtml(file.name)}">${highlightSearch(file.name, query)}</div>
-        <div class="text-xs text-gray-500 flex justify-between"><span>${formatBytes(file.size)}</span><span>${formatS3Modified(file.lastModified)}</span></div>
+        <div class="px-1">
+          <div class="text-sm font-medium text-gray-900 dark:text-gray-200 truncate" title="${escapeHtml(file.name)}">${highlightSearch(file.name, query)}</div>
+          <div class="flex items-center justify-between text-xs text-gray-500 mt-0.5">
+            <span>${formatBytes(file.size)}</span>
+            <span class="uppercase text-[10px] tracking-wider font-semibold ${visual.badgeClass}">${escapeHtml(visual.badgeText)}</span>
+          </div>
+        </div>
       </div>`;
     })
     .join("");
   const listRows = [
     ...(state.s3Browser.folders || []).map((folder) => `
-      <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/30" data-s3-folder-open="${folder.key}">
-        <td class="py-3 px-3"><input type="checkbox" disabled /></td>
-        <td class="py-3 px-3"><button data-s3-folder="${folder.key}" class="text-orange-500 hover:underline flex items-center gap-2"><i data-lucide="folder" class="w-4 h-4"></i>${escapeHtml(folder.key.replace(state.s3Browser.prefix || "", "").replace(/\/$/, "") || "/")}</button></td>
-        <td class="py-3 px-3">Folder</td><td class="py-3 px-3">-</td><td class="py-3 px-3">-</td><td class="py-3 px-3">-</td><td class="py-3 px-3 text-right">-</td>
+      <tr class="hover:bg-gray-50 dark:hover:bg-gray-800/50 group transition-colors" data-s3-folder-open="${folder.key}">
+        <td class="py-3 px-4"><input type="checkbox" disabled class="rounded border-gray-300 bg-gray-100 dark:bg-gray-800 opacity-50" /></td>
+        <td class="py-3 px-4">
+          <button data-s3-folder="${folder.key}" class="text-gray-900 dark:text-gray-200 group-hover:text-orange-500 font-medium flex items-center gap-2.5 transition-colors">
+            <i data-lucide="folder" class="w-4 h-4 text-amber-400 fill-amber-400/20"></i>
+            ${escapeHtml(folder.key.replace(state.s3Browser.prefix || "", "").replace(/\/$/, "") || "/")}
+          </button>
+        </td>
+        <td class="py-3 px-4 text-gray-500">Folder</td><td class="py-3 px-4 text-gray-500">-</td><td class="py-3 px-4 text-gray-500">-</td><td class="py-3 px-4 text-gray-500">-</td><td class="py-3 px-4 text-right">-</td>
       </tr>
     `),
     ...uploads.map(
       (u) => `
-      <tr class="bg-orange-500/10">
-        <td class="py-3 px-3"><input type="checkbox" disabled /></td>
-        <td class="py-3 px-3">
-          <div class="flex items-center gap-2">
-            <span class="inline-flex w-8 h-8 items-center justify-center rounded bg-orange-500/20 text-orange-300"><i data-lucide="upload-cloud" class="w-4 h-4"></i></span>
-            <span class="truncate max-w-[280px]">${escapeHtml(u.name)}</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">${Math.round(u.progress || 0)}%</span>
+      <tr class="bg-orange-50/50 dark:bg-orange-500/5">
+        <td class="py-3 px-4"><input type="checkbox" disabled class="rounded border-gray-300 bg-gray-100 dark:bg-gray-800 opacity-50" /></td>
+        <td class="py-3 px-4">
+          <div class="flex items-center gap-2.5">
+            <span class="inline-flex w-8 h-8 items-center justify-center rounded-md bg-orange-100 dark:bg-orange-500/10 text-orange-500"><i data-lucide="upload-cloud" class="w-4 h-4 animate-pulse"></i></span>
+            <div class="flex flex-col">
+              <span class="truncate max-w-[280px] font-medium text-gray-900 dark:text-gray-200">${escapeHtml(u.name)}</span>
+              <div class="w-32 h-1 bg-gray-200 dark:bg-gray-700 rounded-full mt-1.5 overflow-hidden"><div class="h-full bg-orange-500 rounded-full" style="width:${Math.round(u.progress || 0)}%"></div></div>
+            </div>
+            <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded text-orange-500 ml-2">${Math.round(u.progress || 0)}%</span>
           </div>
         </td>
-        <td class="py-3 px-3">Uploading</td>
-        <td class="py-3 px-3">${formatBytes(u.size)}</td>
-        <td class="py-3 px-3">-</td>
-        <td class="py-3 px-3">-</td>
-        <td class="py-3 px-3 text-right">-</td>
+        <td class="py-3 px-4 text-gray-500">Uploading</td>
+        <td class="py-3 px-4 text-gray-500">${formatBytes(u.size)}</td>
+        <td class="py-3 px-4 text-gray-500">-</td>
+        <td class="py-3 px-4 text-gray-500">-</td>
+        <td class="py-3 px-4 text-right">-</td>
       </tr>`
     ),
     ...visibleFiles.map((file) => {
@@ -875,108 +944,135 @@ function s3BrowserHtml() {
       const visual = getS3TypeVisual(file);
       const ext = getFileExt(file.name || file.key);
       return `
-      <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/30 ${selected ? "bg-orange-500/10" : ""}" data-s3-row-select="${file.key}">
-        <td class="py-3 px-3"><input type="checkbox" class="accent-orange-500" data-s3-select="${file.key}" ${selected ? "checked" : ""}></td>
-        <td class="py-3 px-3">
-          <div class="flex items-center gap-2">
-            <span class="inline-flex w-8 h-8 items-center justify-center rounded overflow-hidden ${visual.bgClass}">
+      <tr class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors group ${selected ? "bg-orange-50/50 dark:bg-orange-500/5" : ""}" data-s3-row-select="${file.key}">
+        <td class="py-3 px-4"><input type="checkbox" class="rounded border-gray-300 text-orange-500 focus:ring-orange-500 bg-white dark:bg-gray-800" data-s3-select="${file.key}" ${selected ? "checked" : ""}></td>
+        <td class="py-3 px-4">
+          <div class="flex items-center gap-2.5">
+            <span class="inline-flex w-8 h-8 items-center justify-center rounded-md overflow-hidden ${visual.bgClass} border border-gray-100 dark:border-gray-700/50">
               ${
                 file.category === "images"
-                  ? `<img data-s3-thumb="${file.key}" alt="${escapeHtml(file.name)}" class="w-full h-full object-cover opacity-0 transition-opacity" loading="lazy" /><span data-s3-thumb-fallback class="text-[9px] font-semibold uppercase">${escapeHtml(ext || "img")}</span>`
-                  : `<i data-lucide="${visual.icon}" class="w-4 h-4"></i>`
+                  ? `<img data-s3-thumb="${file.key}" alt="${escapeHtml(file.name)}" class="w-full h-full object-cover opacity-0 transition-opacity" loading="lazy" /><span data-s3-thumb-fallback class="text-[9px] font-bold tracking-wider uppercase text-gray-400 dark:text-gray-500">${escapeHtml(ext || "IMG")}</span>`
+                  : `<i data-lucide="${visual.icon}" class="w-4 h-4 opacity-70"></i>`
               }
             </span>
-            <span class="truncate max-w-[280px]">${highlightSearch(file.name, query)}</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded-full uppercase ${visual.badgeClass}">${escapeHtml(visual.badgeText)}</span>
+            <span class="truncate max-w-[280px] font-medium text-gray-900 dark:text-gray-200 group-hover:text-orange-500 transition-colors">${highlightSearch(file.name, query)}</span>
+            <span class="text-[9px] font-bold tracking-wider px-1.5 py-0.5 rounded uppercase ${visual.badgeClass}">${escapeHtml(visual.badgeText)}</span>
           </div>
         </td>
-        <td class="py-3 px-3">${getS3TypeLabel(file.category)}</td>
-        <td class="py-3 px-3">${formatBytes(file.size)}</td>
-        <td class="py-3 px-3">${formatS3Modified(file.lastModified)}</td>
-        <td class="py-3 px-3">${file.storageClass || "STANDARD"}</td>
-        <td class="py-3 px-3 text-right s3-row-actions">
-          <button data-s3-preview="${file.key}" class="text-gray-600 dark:text-gray-300 hover:text-orange-500 mr-2"><i data-lucide="eye" class="w-4 h-4"></i></button>
-          <button data-s3-copy-url="${file.key}" class="text-gray-600 dark:text-gray-300 hover:text-orange-500 mr-2"><i data-lucide="link" class="w-4 h-4"></i></button>
-          <button data-s3-download="${file.key}" class="text-gray-600 dark:text-gray-300 hover:text-orange-500 mr-2"><i data-lucide="download" class="w-4 h-4"></i></button>
-          <button data-s3-delete-file="${file.key}" class="text-red-600 dark:text-red-400 hover:text-red-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+        <td class="py-3 px-4 text-gray-600 dark:text-gray-400">${getS3TypeLabel(file.category)}</td>
+        <td class="py-3 px-4 text-gray-600 dark:text-gray-400">${formatBytes(file.size)}</td>
+        <td class="py-3 px-4 text-gray-600 dark:text-gray-400">${formatS3Modified(file.lastModified)}</td>
+        <td class="py-3 px-4 text-gray-600 dark:text-gray-400"><span class="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[10px] font-medium tracking-wide">${file.storageClass || "STANDARD"}</span></td>
+        <td class="py-3 px-4 text-right s3-row-actions">
+          <div class="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button data-s3-preview="${file.key}" class="p-1.5 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors" title="Preview"><i data-lucide="eye" class="w-4 h-4"></i></button>
+            <button data-s3-copy-url="${file.key}" class="p-1.5 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors" title="Copy URL"><i data-lucide="link" class="w-4 h-4"></i></button>
+            <button data-s3-download="${file.key}" class="p-1.5 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors" title="Download"><i data-lucide="download" class="w-4 h-4"></i></button>
+            <div class="w-px h-4 bg-gray-200 dark:bg-gray-700 mx-1"></div>
+            <button data-s3-delete-file="${file.key}" class="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-md transition-colors" title="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+          </div>
         </td>
       </tr>`;
     }),
   ].join("");
   return `
-    <div class="space-y-3">
-      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-3">
-        <div class="flex items-center flex-wrap gap-2 text-sm">
-          <button id="s3-go-up" class="btn-secondary px-2 py-1"><i data-lucide="corner-up-left" class="w-4 h-4"></i></button>
-          ${breadcrumbs
-            .map((part, i) => `<button data-s3-breadcrumb="${i}" class="px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700">${part}</button>`)
-            .join(`<span class="text-gray-400">/</span>`)}
-        </div>
-        <div class="flex items-center gap-2 flex-wrap justify-end">
-          <div class="relative min-w-[220px]">
-            <input id="s3-browser-search" value="${escapeHtml(state.s3Browser.search || "")}" placeholder="Search files..." class="input w-56 pr-6" />
-            ${state.s3Browser.search ? '<button id="s3-clear-search" class="absolute right-0 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">x</button>' : ""}
+    <div class="flex flex-col border border-gray-200 dark:border-gray-800 bg-white dark:bg-[#111827] rounded-xl overflow-hidden mb-4 shadow-sm">
+      <!-- Top Toolbar -->
+      <div class="flex items-center justify-between p-3 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-[#111827]">
+        <div class="flex items-center gap-1 text-sm font-medium">
+          <button id="s3-go-up" class="p-1.5 text-gray-500 hover:text-gray-900 dark:hover:text-white rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"><i data-lucide="corner-up-left" class="w-4 h-4"></i></button>
+          <div class="flex items-center px-2">
+            ${breadcrumbs
+              .map((part, i) => `<button data-s3-breadcrumb="${i}" class="px-1.5 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">${part}</button>`)
+              .join(`<span class="text-gray-400 dark:text-gray-600 mx-0.5">/</span>`)}
           </div>
-          <button data-s3-view="grid" class="btn-secondary ${state.s3Browser.viewMode === "grid" ? "ring-1 ring-orange-500" : ""}"><i data-lucide="layout-grid" class="w-4 h-4"></i></button>
-          <button data-s3-view="list" class="btn-secondary ${state.s3Browser.viewMode === "list" ? "ring-1 ring-orange-500" : ""}"><i data-lucide="list" class="w-4 h-4"></i></button>
-          <button id="s3-create-folder" class="btn-secondary"><i data-lucide="folder-plus" class="w-4 h-4"></i>New folder</button>
+        </div>
+        <div class="flex items-center gap-2.5">
+          <div class="relative group hidden sm:block">
+            <i data-lucide="search" class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-orange-500 transition-colors"></i>
+            <input id="s3-browser-search" value="${escapeHtml(state.s3Browser.search || "")}" placeholder="Search files..." class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-sm rounded-md pl-8 pr-6 py-1.5 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 w-56 transition-all placeholder:text-gray-400" />
+            ${state.s3Browser.search ? '<button id="s3-clear-search" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>' : ""}
+          </div>
+          <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 hidden sm:block mx-0.5"></div>
+          <div class="flex items-center bg-gray-50 dark:bg-gray-900 rounded-md border border-gray-200 dark:border-gray-700 p-0.5">
+            <button data-s3-view="grid" class="p-1 rounded flex items-center justify-center transition-all ${state.s3Browser.viewMode === "grid" ? "bg-white dark:bg-gray-700 shadow-sm text-orange-500" : "text-gray-500 hover:text-gray-900 dark:hover:text-gray-300"}"><i data-lucide="layout-grid" class="w-4 h-4"></i></button>
+            <button data-s3-view="list" class="p-1 rounded flex items-center justify-center transition-all ${state.s3Browser.viewMode === "list" ? "bg-white dark:bg-gray-700 shadow-sm text-orange-500" : "text-gray-500 hover:text-gray-900 dark:hover:text-gray-300"}"><i data-lucide="list" class="w-4 h-4"></i></button>
+          </div>
+          <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5"></div>
+          <button id="s3-create-folder" class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-md transition-colors shadow-sm"><i data-lucide="folder-plus" class="w-4 h-4 text-gray-500"></i><span class="hidden sm:inline">New folder</span></button>
           <input id="s3-upload-file" type="file" class="hidden" multiple />
-          <button id="s3-upload-btn" class="btn-primary"><i data-lucide="upload" class="w-4 h-4"></i>Upload</button>
+          <button id="s3-upload-btn" class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 hover:bg-orange-600 text-white rounded-md transition-colors shadow-sm"><i data-lucide="upload-cloud" class="w-4 h-4"></i><span class="hidden sm:inline">Upload</span></button>
         </div>
       </div>
-      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-3">
-        <div class="flex flex-wrap gap-2">
+
+      <!-- Filter & Sort Bar -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between p-2 bg-gray-50/50 dark:bg-gray-900/30 border-b border-gray-200 dark:border-gray-800 text-sm gap-3 sm:gap-0">
+        <div class="flex items-center gap-1 overflow-x-auto pb-1 sm:pb-0 hide-scrollbar">
           ${pills
-            .map(([key, label]) => `<button data-s3-type="${key}" class="px-3 py-1 text-xs rounded-full border ${state.s3Browser.typeFilter === key ? "bg-orange-500 text-white border-orange-500" : "border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-300"}">${label}</button>`)
+            .map(([key, label]) => `<button data-s3-type="${key}" class="px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${state.s3Browser.typeFilter === key ? "bg-orange-500/10 text-orange-500" : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"}">${label}</button>`)
             .join("")}
         </div>
-        <div class="flex items-center gap-2">
-          <select id="s3-sort-by" class="input">
-            <option value="date" ${state.s3Browser.sortBy === "date" ? "selected" : ""}>Sort by Date modified</option>
-            <option value="name" ${state.s3Browser.sortBy === "name" ? "selected" : ""}>Sort by Name</option>
-            <option value="size" ${state.s3Browser.sortBy === "size" ? "selected" : ""}>Sort by Size</option>
-            <option value="type" ${state.s3Browser.sortBy === "type" ? "selected" : ""}>Sort by Type</option>
-            <option value="storage" ${state.s3Browser.sortBy === "storage" ? "selected" : ""}>Sort by Storage class</option>
-          </select>
-          <button id="s3-sort-dir" class="btn-secondary"><i data-lucide="${state.s3Browser.sortDir === "asc" ? "arrow-up" : "arrow-down"}" class="w-4 h-4"></i></button>
-          <label class="text-xs flex items-center gap-1 ml-2"><input id="s3-recursive-search" type="checkbox" ${state.s3Browser.recursiveSearch ? "checked" : ""}/> Recursive search</label>
+        <div class="flex items-center gap-3 text-xs pl-1">
+          <label class="flex items-center gap-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 cursor-pointer select-none">
+            <input id="s3-recursive-search" type="checkbox" class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-orange-500 focus:ring-orange-500 bg-transparent" ${state.s3Browser.recursiveSearch ? "checked" : ""}/> 
+            Recursive
+          </label>
+          <div class="h-3 w-px bg-gray-300 dark:bg-gray-700"></div>
+          <div class="flex items-center relative group">
+            <select id="s3-sort-by" class="bg-transparent border-none text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 focus:ring-0 py-1 pl-2 pr-6 cursor-pointer text-xs font-medium appearance-none outline-none">
+              <option value="date" class="dark:bg-gray-800" ${state.s3Browser.sortBy === "date" ? "selected" : ""}>Date modified</option>
+              <option value="name" class="dark:bg-gray-800" ${state.s3Browser.sortBy === "name" ? "selected" : ""}>Name</option>
+              <option value="size" class="dark:bg-gray-800" ${state.s3Browser.sortBy === "size" ? "selected" : ""}>Size</option>
+              <option value="type" class="dark:bg-gray-800" ${state.s3Browser.sortBy === "type" ? "selected" : ""}>Type</option>
+              <option value="storage" class="dark:bg-gray-800" ${state.s3Browser.sortBy === "storage" ? "selected" : ""}>Storage class</option>
+            </select>
+            <i data-lucide="chevron-down" class="w-3 h-3 text-gray-400 absolute right-2 pointer-events-none group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-colors"></i>
+          </div>
+          <button id="s3-sort-dir" class="p-1 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-md transition-colors"><i data-lucide="${state.s3Browser.sortDir === "asc" ? "arrow-up" : "arrow-down"}" class="w-3.5 h-3.5"></i></button>
         </div>
       </div>
-      <div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-3">
-        <span>${visibleFiles.length} files</span>
-        <span>Total size: ${formatBytes(filesTotalSize)}</span>
-        <span>Storage class: ${storageClass}</span>
+
+      <!-- Stats Bar -->
+      <div class="flex items-center justify-between px-4 py-2 text-[11px] font-medium text-gray-500 dark:text-gray-400 bg-gray-50/80 dark:bg-[#0a0f16]">
+        <span>${visibleFiles.length} items found</span>
+        <div class="flex items-center gap-5">
+          <span>Total size: ${formatBytes(filesTotalSize)}</span>
+          <span class="hidden sm:inline">Storage class: ${storageClass}</span>
+        </div>
       </div>
-      <div id="s3-folder-inline-create" class="hidden bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-3 flex items-center gap-2">
+    </div>
+      <div id="s3-folder-inline-create" class="hidden bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-800 rounded-xl p-3 flex items-center gap-2 mb-4 shadow-sm">
         <input id="s3-new-folder-input" class="input flex-1" placeholder="New folder name" />
-        <button id="s3-create-folder-confirm" class="btn-primary text-xs px-3">Create</button>
-        <button id="s3-create-folder-cancel" class="btn-secondary text-xs px-3">Cancel</button>
+        <button id="s3-create-folder-confirm" class="btn-primary text-xs px-4 py-1.5">Create</button>
+        <button id="s3-create-folder-cancel" class="btn-secondary text-xs px-4 py-1.5">Cancel</button>
       </div>
       ${
         state.s3Browser.viewMode === "grid"
-          ? `<div id="s3-drop-area" class="relative min-h-[320px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-               <div id="s3-drop-overlay" class="s3-drop-overlay hidden"><div><i data-lucide="upload-cloud" class="w-8 h-8 mx-auto mb-2"></i>Drop files to upload into this folder</div></div>
+          ? `<div id="s3-drop-area" class="relative min-h-[320px] bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-800 rounded-xl p-4 shadow-sm">
+               <div id="s3-drop-overlay" class="s3-drop-overlay hidden rounded-xl backdrop-blur-sm"><div><i data-lucide="upload-cloud" class="w-8 h-8 mx-auto mb-2 text-orange-500"></i><span class="font-medium text-gray-700 dark:text-gray-200">Drop files to upload into this folder</span></div></div>
                <div class="s3-grid ${getS3GridSizeClass()}">
                  ${folderCards}${uploadCards}${fileCards}
                </div>
                ${
                  !folderCards && !fileCards && !uploadCards
-                   ? `<div class="py-16 text-center text-gray-500">
-                        <i data-lucide="folder-open" class="w-10 h-10 mx-auto mb-3"></i>
-                        <h3 class="text-base font-semibold text-gray-700 dark:text-gray-200">This folder is empty</h3>
-                        <p class="text-sm mt-1">Drag files here or click Upload to add files.</p>
-                        <button id="s3-empty-upload-btn" class="btn-primary mt-4">Upload</button>
+                   ? `<div class="py-20 text-center text-gray-500 dark:text-gray-400">
+                        <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-gray-50 dark:bg-gray-800/50 flex items-center justify-center border border-gray-100 dark:border-gray-800">
+                          <i data-lucide="folder-open" class="w-8 h-8 text-gray-400"></i>
+                        </div>
+                        <h3 class="text-base font-medium text-gray-900 dark:text-gray-200">This folder is empty</h3>
+                        <p class="text-sm mt-1 max-w-sm mx-auto">Drag files here or click Upload to add files.</p>
+                        <button id="s3-empty-upload-btn" class="btn-primary mt-6"><i data-lucide="upload-cloud" class="w-4 h-4 mr-2"></i>Upload Files</button>
                       </div>`
                    : ""
                }
              </div>`
-          : `<div id="s3-drop-area" class="relative overflow-x-auto bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm">
-               <div id="s3-drop-overlay" class="s3-drop-overlay hidden"><div><i data-lucide="upload-cloud" class="w-8 h-8 mx-auto mb-2"></i>Drop files to upload into this folder</div></div>
+          : `<div id="s3-drop-area" class="relative overflow-x-auto bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm">
+               <div id="s3-drop-overlay" class="s3-drop-overlay hidden rounded-xl backdrop-blur-sm"><div><i data-lucide="upload-cloud" class="w-8 h-8 mx-auto mb-2 text-orange-500"></i><span class="font-medium text-gray-700 dark:text-gray-200">Drop files to upload into this folder</span></div></div>
                <table class="w-full text-sm">
-                 <thead class="text-left text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700/50">
-                   <tr><th class="py-3 px-3"><input id="s3-select-all" type="checkbox"></th><th class="py-3 px-3">Name</th><th class="py-3 px-3">Type</th><th class="py-3 px-3">Size</th><th class="py-3 px-3">Modified</th><th class="py-3 px-3">Storage class</th><th class="py-3 px-3 text-right">Actions</th></tr>
+                 <thead class="text-left text-gray-500 dark:text-gray-400 bg-gray-50/80 dark:bg-[#0a0f16] border-b border-gray-200 dark:border-gray-800">
+                   <tr><th class="py-3 px-4 font-medium"><input id="s3-select-all" type="checkbox" class="rounded border-gray-300 text-orange-500 focus:ring-orange-500 bg-white dark:bg-gray-800"></th><th class="py-3 px-4 font-medium">Name</th><th class="py-3 px-4 font-medium">Type</th><th class="py-3 px-4 font-medium">Size</th><th class="py-3 px-4 font-medium">Modified</th><th class="py-3 px-4 font-medium">Storage class</th><th class="py-3 px-4 font-medium text-right">Actions</th></tr>
                  </thead>
-                 <tbody class="divide-y divide-gray-200 dark:divide-gray-700">${listRows || `<tr><td colspan="7" class="py-8 text-center text-gray-500">No files</td></tr>`}</tbody>
+                 <tbody class="divide-y divide-gray-100 dark:divide-gray-800/50">${listRows || `<tr><td colspan="7" class="py-12 text-center text-gray-500"><div class="w-12 h-12 mx-auto mb-3 rounded-full bg-gray-50 dark:bg-gray-800/50 flex items-center justify-center border border-gray-100 dark:border-gray-800"><i data-lucide="folder-open" class="w-5 h-5 text-gray-400"></i></div><p>This folder is empty</p></td></tr>`}</tbody>
                </table>
              </div>`
       }
@@ -1046,6 +1142,141 @@ function awsConnectionsHtml() {
              <button id="add-aws-btn-empty" class="btn-primary mt-4">Add AWS Connection</button>
            </div>`
     }
+  `;
+}
+
+function formatWorkspaceServicesSummary(counts = {}) {
+  const items = [
+    ["s3", "S3"],
+    ["rds", "RDS"],
+    ["ec2", "EC2"],
+    ["lambda", "Lambda"],
+    ["sns", "SNS"],
+    ["ses", "SES"],
+    ["cloudwatch", "CloudWatch"],
+    ["secrets", "Secrets"],
+  ]
+    .filter(([key]) => Number(counts[key] || 0) > 0)
+    .map(([key, label]) => `${counts[key]} ${label}`);
+  return items.length ? items.join(" · ") : "No services attached";
+}
+
+function workspacesOverviewHtml() {
+  const cards = (state.workspaces || [])
+    .map((workspace) => {
+      const connection = workspace.primary_connection || null;
+      return `
+        <div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm" style="border-left:3px solid ${workspace.color || "#f97316"};">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(workspace.name)}</h3>
+              <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(workspace.description || "No description")}</p>
+              <p class="text-xs mt-2 text-gray-500 dark:text-gray-400">AWS Account: <span class="font-mono">${escapeHtml(connection?.account_id || "Not linked")}</span></p>
+              <p class="text-xs mt-1 text-gray-500 dark:text-gray-400">Region: <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(workspace.default_region || "us-east-1")}</span></p>
+            </div>
+            <span class="inline-flex items-center text-[11px] px-2 py-1 rounded-full bg-green-500/15 text-green-500">Healthy</span>
+          </div>
+          <p class="text-xs mt-3 text-gray-600 dark:text-gray-300">${escapeHtml(formatWorkspaceServicesSummary(workspace.service_counts || {}))}</p>
+          <p class="text-xs mt-1 text-gray-500 dark:text-gray-400">Last activity: ${timeAgo(workspace.updated_at || workspace.created_at)}</p>
+          <div class="mt-4 flex items-center gap-2">
+            <button data-workspace-open="${workspace.id}" class="btn-secondary text-xs">Open</button>
+            <button data-workspace-edit="${workspace.id}" class="btn-secondary text-xs">Edit</button>
+            <button data-workspace-delete="${workspace.id}" class="text-red-600 dark:text-red-400 text-sm">Delete</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <h2 class="text-2xl font-semibold text-gray-900 dark:text-white">All Workspaces</h2>
+      <button id="add-workspace-btn" class="btn-primary"><i data-lucide="plus" class="w-4 h-4"></i>New Workspace</button>
+    </div>
+    ${
+      state.workspaces.length
+        ? `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">${cards}</div>`
+        : `<div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-8 text-center">
+             <i data-lucide="folders" class="w-10 h-10 text-gray-400 mx-auto"></i>
+             <h3 class="mt-3 text-lg font-semibold">No workspaces yet</h3>
+             <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Create a workspace to group AWS services by project.</p>
+             <button id="add-workspace-btn-empty" class="btn-primary mt-4">Create Workspace</button>
+           </div>`
+    }
+  `;
+}
+
+function workspaceDetailHtml() {
+  const workspace = state.workspaceDetail;
+  if (!workspace) {
+    return `<div class="panel"><p class="text-sm text-gray-500">Workspace not found.</p></div>`;
+  }
+  const services = workspace.services || {};
+  const serviceSections = [
+    { key: "s3", label: "S3 Buckets", icon: "database", subtitle: "Storage configs attached to this workspace" },
+    { key: "sns", label: "SNS Topics", icon: "bell-ring", subtitle: "Topics available for notifications" },
+    { key: "ses", label: "SES Identities", icon: "mail", subtitle: "Sending identities and mail setup" },
+    { key: "cloudwatch", label: "CloudWatch", icon: "scroll-text", subtitle: "Log groups and monitoring streams" },
+    { key: "rds", label: "RDS", icon: "database-zap", subtitle: "Database instances attached to this workspace" },
+    { key: "ec2", label: "EC2", icon: "server-cog", subtitle: "Compute instances attached to this workspace" },
+    { key: "lambda", label: "Lambda", icon: "function-square", subtitle: "Functions and execution details" },
+    { key: "secrets", label: "Secrets Manager", icon: "vault", subtitle: "Managed secrets linked to workspace" },
+  ];
+
+  return `
+    <div class="space-y-4">
+      <div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm" style="border-left:3px solid ${workspace.color || "#f97316"};">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h2 class="text-2xl font-semibold">${escapeHtml(workspace.name)}</h2>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(workspace.description || "No description")}</p>
+            <p class="text-xs mt-2 text-gray-500 dark:text-gray-400">Region: <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(workspace.default_region || "us-east-1")}</span></p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button data-workspace-edit="${workspace.id}" class="btn-secondary text-xs">Edit</button>
+            <button data-workspace-delete="${workspace.id}" class="text-red-600 dark:text-red-400 text-sm">Delete</button>
+          </div>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        ${serviceSections
+          .map((section) => {
+            const rows = services[section.key] || [];
+            if (!rows.length) {
+              return `<div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <h3 class="font-semibold flex items-center gap-2"><i data-lucide="${section.icon}" class="w-4 h-4"></i>${section.label}</h3>
+                    <p class="text-xs text-gray-500 mt-1">${section.subtitle}</p>
+                  </div>
+                  <button data-workspace-add-service="${section.key}" class="btn-secondary text-xs">Add</button>
+                </div>
+                <p class="text-xs text-gray-500 mt-3">No ${section.label.toLowerCase()} attached.</p>
+              </div>`;
+            }
+            return `<div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="font-semibold flex items-center gap-2"><i data-lucide="${section.icon}" class="w-4 h-4"></i>${section.label}</h3>
+                  <p class="text-xs text-gray-500 mt-1">${section.subtitle}</p>
+                </div>
+                <button data-workspace-add-service="${section.key}" class="btn-secondary text-xs">Add</button>
+              </div>
+              <div class="mt-3 space-y-2">
+                ${rows
+                  .slice(0, 4)
+                  .map((row) => `<div class="rounded-lg border border-gray-200 dark:border-gray-700 p-2 text-sm">
+                    <div class="font-medium">${escapeHtml(row.name || row.topic_name || row.identity || row.instance_identifier || row.instance_id || row.function_name || row.secret_name || row.s3_config_id || "Item")}</div>
+                    <div class="text-xs text-gray-500 mt-1">${escapeHtml(row.region || row.bucket_name || row.topic_arn || row.log_group_prefix || row.secret_arn || "workspace service")}</div>
+                  </div>`)
+                  .join("")}
+                ${rows.length > 4 ? `<p class="text-xs text-gray-500">+${rows.length - 4} more</p>` : ""}
+              </div>
+            </div>`;
+          })
+          .join("")}
+      </div>
+    </div>
   `;
 }
 
@@ -1687,6 +1918,10 @@ function render() {
     root.innerHTML = s3ConnectionsHtml();
   } else if (state.view === "s3-browser") {
     root.innerHTML = s3BrowserHtml();
+  } else if (state.view === "workspaces") {
+    root.innerHTML = workspacesOverviewHtml();
+  } else if (state.view === "workspace-detail") {
+    root.innerHTML = workspaceDetailHtml();
   } else if (state.view === "aws-connections") {
     root.innerHTML = awsConnectionsHtml();
   } else if (state.view === "aws-cloudwatch") {
@@ -1825,6 +2060,7 @@ async function refreshData() {
     s3Regions,
     awsConnections,
     awsRegions,
+    workspaces,
     sslMonitors,
     dnsMonitors,
     portMonitors,
@@ -1841,6 +2077,7 @@ async function refreshData() {
     window.OggoAPI.getS3Regions().catch(() => []),
     window.OggoAPI.getAwsConnections().catch(() => []),
     window.OggoAPI.getAwsRegions().catch(() => []),
+    window.OggoAPI.getWorkspaces().catch(() => []),
     window.OggoAPI.listSslMonitors().catch(() => []),
     window.OggoAPI.listDnsMonitors().catch(() => []),
     window.OggoAPI.listPortMonitors().catch(() => []),
@@ -1861,6 +2098,10 @@ async function refreshData() {
   }
   state.awsConnections = awsConnections;
   state.awsRegions = awsRegions;
+  state.workspaces = workspaces;
+  if (!state.activeWorkspaceId && workspaces.length) {
+    state.activeWorkspaceId = workspaces[0].id;
+  }
   state.sslMonitors = sslMonitors;
   state.dnsMonitors = dnsMonitors;
   state.portMonitors = portMonitors;
@@ -1869,6 +2110,93 @@ async function refreshData() {
   if (!state.awsActiveConnectionId && awsConnections.length) {
     state.awsActiveConnectionId = awsConnections[0].id;
   }
+}
+
+async function loadWorkspaceDetail(workspaceId) {
+  if (!workspaceId) return;
+  state.workspaceDetail = await window.OggoAPI.getWorkspace(workspaceId);
+  state.activeWorkspaceId = workspaceId;
+}
+
+function openWorkspaceModal(workspace = null) {
+  const modal = el("job-modal");
+  const body = el("job-modal-body");
+  const connectionOptions = state.awsConnections
+    .map(
+      (conn) => `<label class="flex items-center gap-2 text-sm">
+      <input type="checkbox" name="awsConnectionIds" value="${conn.id}" ${
+        workspace?.aws_connections?.some((row) => row.aws_connection_id === conn.id) ? "checked" : ""
+      } />
+      <span>${escapeHtml(conn.name)} <span class="text-xs text-gray-500">(${escapeHtml(conn.default_region || "")})</span></span>
+    </label>`
+    )
+    .join("");
+  body.innerHTML = `
+    <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${workspace ? "Edit Workspace" : "New Workspace"}</h3>
+      <button type="button" id="workspace-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="workspace-form" class="space-y-5 p-6">
+      <input type="hidden" name="id" value="${workspace?.id || ""}" />
+      ${field("Workspace name", `<input required name="name" class="input" value="${escapeHtml(workspace?.name || "")}" placeholder="Farmland India" />`)}
+      ${field("Description", `<textarea name="description" class="input min-h-[80px]" placeholder="Project notes">${escapeHtml(workspace?.description || "")}</textarea>`)}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        ${field("Color", `<input name="color" type="color" class="input h-11 p-2" value="${workspace?.color || "#f97316"}" />`)}
+        ${field(
+          "Default region",
+          `<select name="default_region" class="input">${state.awsRegions
+            .map((r) => `<option value="${r.id}" ${(workspace?.default_region || "us-east-1") === r.id ? "selected" : ""}>${r.name} (${r.id})</option>`)
+            .join("")}</select>`
+        )}
+      </div>
+      <div class="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-3">
+        <div class="text-sm font-medium mb-2">AWS Connections</div>
+        <div class="space-y-1 max-h-32 overflow-auto">${connectionOptions || '<div class="text-xs text-gray-500">No AWS connections yet.</div>'}</div>
+      </div>
+      <div class="flex gap-3 justify-end pt-4 border-t border-gray-100 dark:border-gray-700">
+        <button type="button" id="workspace-cancel" class="btn-secondary px-6">Cancel</button>
+        <button type="submit" class="btn-primary px-8">Save Workspace</button>
+      </div>
+    </form>
+  `;
+  modal.classList.remove("hidden");
+  if (window.lucide) window.lucide.createIcons();
+  const close = () => modal.classList.add("hidden");
+  el("workspace-close").onclick = close;
+  el("workspace-cancel").onclick = close;
+  el("workspace-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const awsConnectionIds = form.getAll("awsConnectionIds");
+    const payload = {
+      name: String(form.get("name") || "").trim(),
+      description: String(form.get("description") || "").trim(),
+      color: String(form.get("color") || "#f97316"),
+      default_region: String(form.get("default_region") || "us-east-1"),
+      aws_connection_ids: awsConnectionIds,
+      primary_aws_connection_id: awsConnectionIds[0] || null,
+    };
+    try {
+      const id = String(form.get("id") || "").trim();
+      const saved = id
+        ? await window.OggoAPI.updateWorkspace(id, payload)
+        : await window.OggoAPI.createWorkspace(payload);
+      await refreshData();
+      if (saved?.id) {
+        state.activeWorkspaceId = saved.id;
+        await loadWorkspaceDetail(saved.id);
+        state.view = "workspace-detail";
+      } else {
+        state.view = "workspaces";
+      }
+      render();
+      bindViewEvents();
+      close();
+      toast(`Workspace ${id ? "updated" : "created"}`, "success");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  };
 }
 
 async function scanSoftware(manager = "") {
@@ -2695,6 +3023,13 @@ function connectTerminal(serverId) {
       if (msg.type === "error_card") renderTerminalErrorCard(msg.data);
       if (msg.type === "status" && msg.status === "connected") {
         term.writeln("\r\nConnected.\r\n");
+        const prefill = localStorage.getItem("oggo.terminal.prefill");
+        if (prefill) {
+          term.write(prefill);
+          terminalCurrentLine = prefill;
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "data", data: prefill }));
+          localStorage.removeItem("oggo.terminal.prefill");
+        }
         if (overlay) overlay.classList.add("hidden");
       }
     } catch (_error) {
@@ -3028,6 +3363,241 @@ async function openTerminalHistoryOverlay(serverId) {
   toast("Loaded from history", "success");
 }
 
+function persistGlobalSearchRecent(item) {
+  const next = [item, ...(state.globalSearch.recent || []).filter((entry) => entry.id !== item.id)].slice(0, 5);
+  state.globalSearch.recent = next;
+  localStorage.setItem("oggo.globalSearch.recent", JSON.stringify(next));
+}
+
+function getQuickSearchActions() {
+  return [
+    { id: "quick:add-job", title: "Add job", description: "Open new job form", action: "add-job", icon: "plus-circle" },
+    { id: "quick:add-server", title: "Add server", description: "Open new server form", action: "add-server", icon: "server" },
+    { id: "quick:new-workspace", title: "New workspace", description: "Create workspace", action: "new-workspace", icon: "folders" },
+    { id: "quick:terminal", title: "Open terminal", description: "Go to SSH terminal", action: "terminal", icon: "terminal" },
+    { id: "quick:settings", title: "Settings", description: "Open settings page", action: "settings", icon: "settings" },
+  ];
+}
+
+function flattenGroupedSearchResults(grouped) {
+  const flat = [];
+  for (const group of grouped || []) {
+    for (const item of group.results || []) {
+      flat.push(item);
+    }
+  }
+  return flat;
+}
+
+function renderGlobalSearchOverlay() {
+  const overlay = el("global-search-overlay");
+  const input = el("global-search-input");
+  const results = el("global-search-results");
+  if (!overlay || !input || !results) return;
+
+  overlay.classList.toggle("hidden", !state.globalSearch.open);
+  if (!state.globalSearch.open) return;
+
+  const query = String(state.globalSearch.query || "").trim();
+  if (!query) {
+    const recent = state.globalSearch.recent || [];
+    const quick = getQuickSearchActions();
+    const pinned = state.globalSearch.pinned || [];
+    state.globalSearch.flatResults = [...recent, ...quick, ...pinned];
+    state.globalSearch.selectedIndex = Math.min(
+      state.globalSearch.selectedIndex,
+      Math.max(state.globalSearch.flatResults.length - 1, 0)
+    );
+    results.innerHTML = `
+      <div class="space-y-4">
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-2">Recent</div>
+          ${(recent.length
+            ? recent
+                .map(
+                  (item, index) => `<button data-global-search-pick="${index}" class="w-full text-left px-3 py-2 rounded-md ${
+                    state.globalSearch.selectedIndex === index
+                      ? "bg-orange-500/10 text-orange-500"
+                      : "hover:bg-gray-100 dark:hover:bg-gray-800"
+                  }">
+                  <div class="text-sm font-medium">${escapeHtml(item.title || item.name || "Recent item")}</div>
+                  <div class="text-xs text-gray-500">${escapeHtml(item.description || "")}</div>
+                </button>`
+                )
+                .join("")
+            : '<p class="text-xs text-gray-500">No recent pages yet.</p>')}
+        </div>
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-2">Quick actions</div>
+          ${quick
+            .map(
+              (item, index) => `<button data-global-search-pick="${recent.length + index}" class="w-full text-left px-3 py-2 rounded-md ${
+                state.globalSearch.selectedIndex === recent.length + index
+                  ? "bg-orange-500/10 text-orange-500"
+                  : "hover:bg-gray-100 dark:hover:bg-gray-800"
+              }">
+              <div class="text-sm font-medium flex items-center gap-2"><i data-lucide="${item.icon}" class="w-4 h-4"></i>${escapeHtml(item.title)}</div>
+              <div class="text-xs text-gray-500">${escapeHtml(item.description || "")}</div>
+            </button>`
+            )
+            .join("")}
+        </div>
+      </div>
+    `;
+    if (window.lucide) window.lucide.createIcons();
+    return;
+  }
+
+  const grouped = state.globalSearch.groupedResults || [];
+  state.globalSearch.flatResults = flattenGroupedSearchResults(grouped);
+  state.globalSearch.selectedIndex = Math.min(
+    state.globalSearch.selectedIndex,
+    Math.max(state.globalSearch.flatResults.length - 1, 0)
+  );
+  let cursor = 0;
+  results.innerHTML = grouped.length
+    ? grouped
+        .map((group) => {
+          const head = `
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[11px] uppercase tracking-wide text-gray-500">${escapeHtml(group.category)} (${group.total})</span>
+              ${group.hasMore ? '<span class="text-[11px] text-orange-500">Show all</span>' : ""}
+            </div>
+          `;
+          const rows = (group.results || [])
+            .map((item) => {
+              const index = cursor++;
+              return `<button data-global-search-pick="${index}" class="w-full text-left px-3 py-2 rounded-md ${
+                state.globalSearch.selectedIndex === index
+                  ? "bg-orange-500/10 text-orange-500"
+                  : "hover:bg-gray-100 dark:hover:bg-gray-800"
+              }">
+                <div class="text-sm font-medium">${escapeHtml(item.title || item.name || "")}</div>
+                <div class="text-xs text-gray-500">${escapeHtml(item.description || "")}</div>
+              </button>`;
+            })
+            .join("");
+          return `<div class="mb-3">${head}${rows}</div>`;
+        })
+        .join("")
+    : '<p class="text-sm text-gray-500">No matches found.</p>';
+}
+
+async function performGlobalSearch() {
+  const query = String(state.globalSearch.query || "").trim().toLowerCase();
+  if (!query) {
+    state.globalSearch.groupedResults = [];
+    renderGlobalSearchOverlay();
+    return;
+  }
+  if (!state.globalSearch.indexItems.length) {
+    const index = await window.OggoAPI.getSearchIndex();
+    state.globalSearch.indexItems = index.items || [];
+    state.globalSearch.indexBuiltAt = index.builtAt || null;
+  }
+
+  const rank = (item) => {
+    const title = String(item.title || "").toLowerCase();
+    const desc = String(item.description || "").toLowerCase();
+    const keywords = Array.isArray(item.keywords)
+      ? item.keywords.join(" ").toLowerCase()
+      : String(item.keywords || "").toLowerCase();
+    if (title === query) return 100;
+    if (title.startsWith(query)) return 80;
+    if (title.includes(query)) return 60;
+    if (desc.includes(query) || keywords.includes(query)) return 40;
+    return 0;
+  };
+  const scored = state.globalSearch.indexItems
+    .map((item) => ({ ...item, _score: rank(item) }))
+    .filter((item) => item._score > 0)
+    .sort((a, b) => b._score - a._score);
+
+  const groupedMap = {};
+  for (const item of scored) {
+    if (!groupedMap[item.category]) groupedMap[item.category] = [];
+    if (groupedMap[item.category].length < 4) {
+      groupedMap[item.category].push(item);
+    }
+  }
+  state.globalSearch.groupedResults = Object.entries(groupedMap).map(([category, rows]) => ({
+    category,
+    total: scored.filter((row) => row.category === category).length,
+    hasMore: scored.filter((row) => row.category === category).length > rows.length,
+    results: rows,
+  }));
+  state.globalSearch.selectedIndex = 0;
+  renderGlobalSearchOverlay();
+}
+
+async function applyGlobalSearchSelection(item) {
+  if (!item) return;
+  if (item.action === "add-job") {
+    closeGlobalSearch();
+    openJobModal();
+    return;
+  }
+  if (item.action === "add-server") {
+    closeGlobalSearch();
+    openServerModal();
+    return;
+  }
+  if (item.action === "new-workspace") {
+    closeGlobalSearch();
+    openWorkspaceModal();
+    return;
+  }
+  if (item.action === "terminal") {
+    state.view = "terminal";
+    state.navSection = "servers";
+  } else if (item.action === "settings") {
+    state.view = "settings";
+    state.navSection = "settings";
+  } else if (item.route === "workspace-detail") {
+    state.view = "workspace-detail";
+    state.navSection = "aws";
+    state.activeWorkspaceId = item.entityId;
+    await loadWorkspaceDetail(item.entityId);
+  } else if (item.route === "s3-browser") {
+    state.view = "s3-browser";
+    state.navSection = "storage";
+    await openS3Browser(item.entityId, "");
+  } else if (item.route === "terminal" && item.entityId) {
+    state.view = "terminal";
+    state.navSection = "servers";
+    state.activeTerminalServerId = item.entityId;
+    localStorage.setItem("oggo.terminal.prefill", String(item.title || ""));
+  } else {
+    state.view = item.route || "dashboard";
+    state.navSection = VIEW_TO_SECTION[state.view] || state.navSection;
+  }
+
+  persistGlobalSearchRecent(item);
+  closeGlobalSearch();
+  render();
+  bindViewEvents();
+  if (state.view === "terminal" && state.activeTerminalServerId) {
+    connectTerminal(state.activeTerminalServerId);
+  }
+}
+
+function openGlobalSearch() {
+  state.globalSearch.open = true;
+  state.globalSearch.query = "";
+  state.globalSearch.selectedIndex = 0;
+  renderGlobalSearchOverlay();
+  const input = el("global-search-input");
+  if (input) {
+    input.value = "";
+    setTimeout(() => input.focus(), 0);
+  }
+}
+
+function closeGlobalSearch() {
+  state.globalSearch.open = false;
+  renderGlobalSearchOverlay();
+}
+
 function bindGlobalEvents() {
   document.querySelectorAll("[data-rail-section]").forEach((btn) =>
     btn.addEventListener("click", async () => {
@@ -3039,9 +3609,15 @@ function bindGlobalEvents() {
         state.contextCollapsed = false;
         state.navSection = section;
       }
-      const nextView = state.sectionLastView[section] || NAV_STRUCTURE[section]?.items?.find((i) => i.view)?.view || "dashboard";
+      const nextView =
+        state.sectionLastView[section] ||
+        (section === "aws" ? "workspaces" : NAV_STRUCTURE[section]?.items?.find((i) => i.view)?.view) ||
+        "dashboard";
       state.view = nextView;
       await refreshData();
+      if (state.view === "workspace-detail" && state.activeWorkspaceId) {
+        await loadWorkspaceDetail(state.activeWorkspaceId);
+      }
       if (["aws-cloudwatch", "aws-rds", "aws-ec2", "aws-lambda", "aws-secrets"].includes(state.view)) {
         await loadAwsServiceData(state.view);
       }
@@ -3059,6 +3635,7 @@ function bindGlobalEvents() {
     contextList.onclick = async (event) => {
       const action = event.target.closest("[data-context-action]")?.dataset?.contextAction;
       const view = event.target.closest("[data-context-view]")?.dataset?.contextView;
+      const workspaceId = event.target.closest("[data-context-workspace-id]")?.dataset?.contextWorkspaceId;
       if (action === "add-server") {
         openServerModal();
         return;
@@ -3067,10 +3644,20 @@ function bindGlobalEvents() {
         openS3Modal();
         return;
       }
+      if (action === "new-workspace") {
+        openWorkspaceModal();
+        return;
+      }
       if (!view) return;
       state.view = view;
+      if (workspaceId) {
+        state.activeWorkspaceId = workspaceId;
+      }
       state.sectionLastView[state.navSection] = view;
       await refreshData();
+      if (state.view === "workspace-detail" && state.activeWorkspaceId) {
+        await loadWorkspaceDetail(state.activeWorkspaceId);
+      }
       if (["aws-cloudwatch", "aws-rds", "aws-ec2", "aws-lambda", "aws-secrets"].includes(state.view)) {
         await loadAwsServiceData(state.view);
       }
@@ -3086,6 +3673,78 @@ function bindGlobalEvents() {
 
   const themeBtn = el("theme-toggle");
   if (themeBtn) themeBtn.onclick = () => window.OggoTheme.toggle();
+
+  const workspaceSwitcher = el("top-workspace-switcher");
+  if (workspaceSwitcher) {
+    workspaceSwitcher.onchange = async () => {
+      state.activeWorkspaceId = workspaceSwitcher.value;
+      if (state.activeWorkspaceId) {
+        await loadWorkspaceDetail(state.activeWorkspaceId);
+        state.view = "workspace-detail";
+        state.navSection = "aws";
+      }
+      render();
+      bindViewEvents();
+    };
+  }
+
+  const searchBtn = el("global-search-btn");
+  if (searchBtn) searchBtn.onclick = () => openGlobalSearch();
+
+  const searchOverlay = el("global-search-overlay");
+  const searchInput = el("global-search-input");
+  const searchResults = el("global-search-results");
+  if (searchOverlay) {
+    searchOverlay.onclick = (event) => {
+      if (event.target.id === "global-search-overlay") closeGlobalSearch();
+    };
+  }
+  if (searchInput) {
+    searchInput.oninput = async (event) => {
+      state.globalSearch.query = event.target.value;
+      await performGlobalSearch();
+    };
+    searchInput.onkeydown = async (event) => {
+      const max = Math.max((state.globalSearch.flatResults || []).length - 1, 0);
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        state.globalSearch.selectedIndex = Math.min(max, state.globalSearch.selectedIndex + 1);
+        renderGlobalSearchOverlay();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        state.globalSearch.selectedIndex = Math.max(0, state.globalSearch.selectedIndex - 1);
+        renderGlobalSearchOverlay();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        const picked = state.globalSearch.flatResults[state.globalSearch.selectedIndex];
+        if (picked) await applyGlobalSearchSelection(picked);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        closeGlobalSearch();
+      }
+    };
+  }
+  if (searchResults) {
+    searchResults.onclick = async (event) => {
+      const idx = Number(event.target.closest("[data-global-search-pick]")?.dataset?.globalSearchPick);
+      if (Number.isFinite(idx)) {
+        const picked = state.globalSearch.flatResults[idx];
+        if (picked) await applyGlobalSearchSelection(picked);
+      }
+    };
+  }
+
+  document.addEventListener("keydown", async (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      openGlobalSearch();
+      return;
+    }
+    if (event.key === "Escape" && state.globalSearch.open) {
+      event.preventDefault();
+      closeGlobalSearch();
+    }
+  });
 
   const restartBtn = el("server-restart-btn");
   if (restartBtn) {
@@ -3128,6 +3787,106 @@ function bindViewEvents() {
       connectTerminal(id);
     };
   });
+
+  if (state.view === "workspaces") {
+    const addBtn = el("add-workspace-btn");
+    const addBtnEmpty = el("add-workspace-btn-empty");
+    if (addBtn) addBtn.onclick = () => openWorkspaceModal();
+    if (addBtnEmpty) addBtnEmpty.onclick = () => openWorkspaceModal();
+    el("app-content").onclick = async (event) => {
+      const openId = event.target.closest("[data-workspace-open]")?.dataset?.workspaceOpen;
+      const editId = event.target.closest("[data-workspace-edit]")?.dataset?.workspaceEdit;
+      const deleteId = event.target.closest("[data-workspace-delete]")?.dataset?.workspaceDelete;
+      try {
+        if (openId) {
+          state.activeWorkspaceId = openId;
+          await loadWorkspaceDetail(openId);
+          state.view = "workspace-detail";
+          render();
+          bindViewEvents();
+          return;
+        }
+        if (editId) {
+          const detail = await window.OggoAPI.getWorkspace(editId);
+          openWorkspaceModal(detail);
+          return;
+        }
+        if (deleteId) {
+          if (!confirm("Delete this workspace?")) return;
+          await window.OggoAPI.deleteWorkspace(deleteId);
+          await refreshData();
+          state.view = "workspaces";
+          toast("Workspace deleted", "success");
+          render();
+          bindViewEvents();
+        }
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
+  }
+
+  if (state.view === "workspace-detail") {
+    el("app-content").onclick = async (event) => {
+      const editId = event.target.closest("[data-workspace-edit]")?.dataset?.workspaceEdit;
+      const deleteId = event.target.closest("[data-workspace-delete]")?.dataset?.workspaceDelete;
+      const addServiceType = event.target.closest("[data-workspace-add-service]")?.dataset?.workspaceAddService;
+      try {
+        if (editId) {
+          const detail = await window.OggoAPI.getWorkspace(editId);
+          openWorkspaceModal(detail);
+          return;
+        }
+        if (deleteId) {
+          if (!confirm("Delete this workspace?")) return;
+          await window.OggoAPI.deleteWorkspace(deleteId);
+          await refreshData();
+          state.workspaceDetail = null;
+          state.view = "workspaces";
+          toast("Workspace deleted", "success");
+          render();
+          bindViewEvents();
+          return;
+        }
+        if (addServiceType && state.activeWorkspaceId) {
+          if (addServiceType === "s3") {
+            const options = state.s3Connections
+              .map((row, idx) => `${idx + 1}. ${row.name} (${row.bucket_name})`)
+              .join("\n");
+            const input = prompt(`Attach S3 config to workspace.\n${options}\n\nEnter config number:`);
+            const index = Number(input || 0) - 1;
+            if (index >= 0 && state.s3Connections[index]) {
+              await window.OggoAPI.attachWorkspaceService(state.activeWorkspaceId, "s3", {
+                s3_config_id: state.s3Connections[index].id,
+              });
+            }
+          } else {
+            const name = prompt(`Add ${addServiceType} entry name`);
+            if (!name) return;
+            const payload = {
+              aws_connection_id: state.awsActiveConnectionId || state.awsConnections[0]?.id || null,
+              region: state.workspaceDetail?.default_region || "us-east-1",
+            };
+            if (addServiceType === "sns") payload.topic_name = name;
+            if (addServiceType === "ses") payload.identity = name;
+            if (addServiceType === "cloudwatch") payload.name = name;
+            if (addServiceType === "rds") payload.instance_identifier = name;
+            if (addServiceType === "ec2") payload.instance_id = name;
+            if (addServiceType === "lambda") payload.function_name = name;
+            if (addServiceType === "secrets") payload.secret_name = name;
+            await window.OggoAPI.attachWorkspaceService(state.activeWorkspaceId, addServiceType, payload);
+          }
+          await refreshData();
+          await loadWorkspaceDetail(state.activeWorkspaceId);
+          toast("Service attached", "success");
+          render();
+          bindViewEvents();
+        }
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
+  }
 
   if (state.view === "jobs") {
     const searchInput = el("job-search-input");
