@@ -1,4 +1,5 @@
 const fs = require("fs-extra");
+const path = require("path");
 const Database = require("better-sqlite3");
 const mysql = require("mysql2/promise");
 const { getoggoDataDir, getDbPath } = require("../services/platformService");
@@ -6,6 +7,7 @@ const { loadConfig } = require("../config/configLoader");
 
 let db;
 let engine = "sqlite";
+const migrationsDir = path.join(__dirname, "migrations");
 
 function normalizeParams(sql, params) {
   if (!params || Array.isArray(params)) return { sql, values: params || [] };
@@ -127,6 +129,25 @@ function getSchemaStatements(targetEngine) {
         category VARCHAR(128),
         builtin TINYINT(1) DEFAULT 0,
         created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS command_categories (
+        id VARCHAR(64) PRIMARY KEY,
+        server_id VARCHAR(64),
+        name VARCHAR(255) NOT NULL,
+        scope VARCHAR(16) NOT NULL,
+        sort_order INT DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS saved_commands (
+        id VARCHAR(64) PRIMARY KEY,
+        server_id VARCHAR(64),
+        name VARCHAR(255) NOT NULL,
+        command TEXT NOT NULL,
+        category VARCHAR(255),
+        scope VARCHAR(16) NOT NULL,
+        sort_order INT DEFAULT 0,
+        created_at VARCHAR(64),
+        last_used_at VARCHAR(64),
+        use_count INT DEFAULT 0
       )`,
       `CREATE TABLE IF NOT EXISTS s3_connections (
         id VARCHAR(64) PRIMARY KEY,
@@ -470,6 +491,25 @@ function getSchemaStatements(targetEngine) {
       builtin INTEGER DEFAULT 0,
       created_at TEXT
     )`,
+    `CREATE TABLE IF NOT EXISTS command_categories (
+      id TEXT PRIMARY KEY,
+      server_id TEXT,
+      name TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS saved_commands (
+      id TEXT PRIMARY KEY,
+      server_id TEXT,
+      name TEXT NOT NULL,
+      command TEXT NOT NULL,
+      category TEXT,
+      scope TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT,
+      last_used_at TEXT,
+      use_count INTEGER DEFAULT 0
+    )`,
     `CREATE TABLE IF NOT EXISTS s3_connections (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -725,6 +765,57 @@ async function createMysqlPool(mysqlConfig) {
   });
 }
 
+function getMigrationTableSql(targetEngine) {
+  if (targetEngine === "mysql") {
+    return `CREATE TABLE IF NOT EXISTS schema_migrations (
+      id VARCHAR(255) PRIMARY KEY,
+      applied_at VARCHAR(64) NOT NULL
+    )`;
+  }
+  return `CREATE TABLE IF NOT EXISTS schema_migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`;
+}
+
+async function listMigrationFiles() {
+  const exists = await fs.pathExists(migrationsDir);
+  if (!exists) return [];
+  const entries = await fs.readdir(migrationsDir);
+  return entries
+    .filter((file) => /^\d+_.*\.js$/.test(file))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function isMigrationApplied(id) {
+  const row = await get("SELECT id FROM schema_migrations WHERE id = ?", [id]);
+  return Boolean(row);
+}
+
+async function markMigrationApplied(id) {
+  await run(
+    "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+    [id, new Date().toISOString()]
+  );
+}
+
+async function runMigrations() {
+  await exec(getMigrationTableSql(engine));
+  const files = await listMigrationFiles();
+  for (const file of files) {
+    const migrationId = file.replace(/\.js$/, "");
+    if (await isMigrationApplied(migrationId)) continue;
+    // Load migrations lazily so new files are picked up without restart tooling.
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    const migration = require(path.join(migrationsDir, file));
+    if (typeof migration?.up !== "function") {
+      throw new Error(`Migration ${migrationId} must export an up() function`);
+    }
+    await migration.up({ exec, getDbEngine });
+    await markMigrationApplied(migrationId);
+  }
+}
+
 async function initializeDatabase() {
   if (db) return db;
 
@@ -739,6 +830,7 @@ async function initializeDatabase() {
     for (const statement of statements) {
       await db.query(statement);
     }
+    await runMigrations();
     return db;
   }
 
@@ -750,6 +842,7 @@ async function initializeDatabase() {
   for (const statement of statements) {
     db.exec(statement);
   }
+  await runMigrations();
   return db;
 }
 

@@ -40,6 +40,10 @@ function getSystemCrontabPath() {
     : null;
 }
 
+function isUnix() {
+  return process.platform === "linux" || process.platform === "darwin";
+}
+
 module.exports = {
   getHomeDir,
   getoggoDir,
@@ -50,4 +54,5 @@ module.exports = {
   getRuntimePath,
   getLogFilePath,
   getSystemCrontabPath,
+  isUnix,
 };

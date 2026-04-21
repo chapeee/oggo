@@ -29,12 +29,12 @@ function safeJson(value, fallback) {
   }
 }
 
-function shellQuote(value) {
-  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
-}
-
 function validatePackageName(name) {
   return /^[a-zA-Z0-9@._/+:-]+$/.test(String(name || ""));
+}
+
+function validatePackageVersion(version) {
+  return /^[a-zA-Z0-9._:+-]+$/.test(String(version || ""));
 }
 
 function semverType(installed, latest) {
@@ -81,7 +81,17 @@ async function runOnTarget(target, command, timeoutMs = 120000) {
 }
 
 async function detectManagers(target) {
-  const command = `set +e; for c in npm pip pip3 composer apt apt-get yum dnf gem cargo yarn brew; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done`;
+  const candidates = ["npm", "pip", "pip3", "composer", "apt", "apt-get", "yum", "dnf", "gem", "cargo", "yarn", "brew"];
+  if (target.targetType === "local" && process.platform === "win32") {
+    const checks = await Promise.all(
+      candidates.map(async (name) => {
+        const res = await runOnTarget(target, `where ${name}`, 8000);
+        return Number(res.exitCode) === 0 ? name : null;
+      })
+    );
+    return checks.filter(Boolean);
+  }
+  const command = `set +e; for c in ${candidates.join(" ")}; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done`;
   const result = await runOnTarget(target, command, 20000);
   const detected = (result.output || "")
     .split(/\r?\n/)
@@ -451,11 +461,15 @@ async function scanPackages(serverId, managerFilter = null) {
 }
 
 function commandForOperation(action, manager, packageName, version, mode) {
-  const pkg = shellQuote(packageName);
-  const withVersion = version ? `${shellQuote(`${packageName}@${version}`)}` : pkg;
+  const pkg = String(packageName || "");
+  const npmWithVersion = version ? `${pkg}@${version}` : pkg;
+  const pipWithVersion = version ? `${pkg}==${version}` : pkg;
+  const composerWithVersion = version ? `${pkg}:${version}` : pkg;
+  const gemVersionArg = version ? ` -v ${version}` : "";
+  const aptWithVersion = version ? `${pkg}=${version}` : pkg;
   if (action === "update") {
     if (manager === "npm") return `npm update -g ${pkg}`;
-    if (manager === "yarn") return `yarn global add ${withVersion}`;
+    if (manager === "yarn") return `yarn global add ${npmWithVersion}`;
     if (manager === "pip" || manager === "pip3") return `${manager} install --upgrade ${pkg}`;
     if (manager === "composer") return `composer global update ${pkg}`;
     if (manager === "apt" || manager === "apt-get") return `sudo apt-get install --only-upgrade -y ${pkg}`;
@@ -478,14 +492,14 @@ function commandForOperation(action, manager, packageName, version, mode) {
     if (manager === "brew") return `brew uninstall ${pkg}`;
   }
   if (action === "install") {
-    if (manager === "npm") return `npm install -g ${withVersion}`;
-    if (manager === "yarn") return `yarn global add ${withVersion}`;
-    if (manager === "pip" || manager === "pip3") return `${manager} install ${withVersion}`;
-    if (manager === "composer") return `composer global require ${withVersion}`;
-    if (manager === "apt" || manager === "apt-get") return `sudo apt-get install -y ${pkg}`;
+    if (manager === "npm") return `npm install -g ${npmWithVersion}`;
+    if (manager === "yarn") return `yarn global add ${npmWithVersion}`;
+    if (manager === "pip" || manager === "pip3") return `${manager} install ${pipWithVersion}`;
+    if (manager === "composer") return `composer global require ${composerWithVersion}`;
+    if (manager === "apt" || manager === "apt-get") return `sudo apt-get install -y ${aptWithVersion}`;
     if (manager === "yum") return `sudo yum install -y ${pkg}`;
     if (manager === "dnf") return `sudo dnf install -y ${pkg}`;
-    if (manager === "gem") return `gem install ${pkg}`;
+    if (manager === "gem") return `gem install ${pkg}${gemVersionArg}`;
     if (manager === "cargo") return `cargo install ${pkg}`;
     if (manager === "brew") return `brew install ${pkg}`;
   }
@@ -522,6 +536,7 @@ async function executePackageOperation(serverId, payload) {
   const { manager, packageName, action, version, fromVersion, toVersion, triggeredBy } = payload || {};
   if (!manager || !action) throw new Error("manager and action are required");
   if (!validatePackageName(packageName || "x")) throw new Error("Invalid package name");
+  if (version && !validatePackageVersion(version)) throw new Error("Invalid version");
   const target = await resolveTarget(serverId);
   const command = commandForOperation(action, manager, packageName, version);
   const result = await runOnTarget(target, command, 180000);
@@ -634,6 +649,85 @@ async function queryOsvVulnerabilities(manager, packageName, version) {
   return response.json();
 }
 
+/**
+ * Returns recent published versions for a package manager.
+ *
+ * @param {string} serverId
+ * @param {string} manager
+ * @param {string} packageName
+ * @param {number} [limit]
+ * @returns {Promise<Array<{version: string, publishedAt: string}>>}
+ */
+async function listPublishedVersions(serverId, manager, packageName, limit = 5) {
+  if (!validatePackageName(packageName)) throw new Error("Invalid package name");
+  const target = await resolveTarget(serverId);
+  const max = Math.max(1, Math.min(20, Number(limit || 5)));
+
+  if (manager === "npm" || manager === "yarn") {
+    const [versionsRes, timeRes] = await Promise.all([
+      runOnTarget(target, `npm view ${packageName} versions --json`, 60000),
+      runOnTarget(target, `npm view ${packageName} time --json`, 60000),
+    ]);
+    const versions = safeJson(versionsRes.output || "[]", []);
+    const timeMap = safeJson(timeRes.output || "{}", {});
+    return (Array.isArray(versions) ? versions : [])
+      .slice(-max)
+      .reverse()
+      .map((version) => ({ version: String(version), publishedAt: String(timeMap?.[version] || "") }));
+  }
+
+  if (manager === "pip" || manager === "pip3") {
+    const result = await runOnTarget(target, `${manager} index versions ${packageName}`, 60000);
+    const line = (result.output || "").split(/\r?\n/).find((row) => row.toLowerCase().includes("available versions:")) || "";
+    const raw = line.split(":").slice(1).join(":");
+    const versions = raw
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .slice(0, max);
+    return versions.map((version) => ({ version, publishedAt: "" }));
+  }
+
+  if (manager === "composer") {
+    const result = await runOnTarget(target, `composer show ${packageName} --all --format=json`, 60000);
+    const data = safeJson(result.output || "{}", {});
+    const versions = Array.isArray(data?.versions) ? data.versions : [];
+    return versions
+      .filter((v) => !String(v).toLowerCase().includes("dev"))
+      .slice(0, max)
+      .map((version) => ({ version: String(version), publishedAt: "" }));
+  }
+
+  if (manager === "gem") {
+    const result = await runOnTarget(target, `gem list -ra ${packageName}`, 60000);
+    const line = (result.output || "")
+      .split(/\r?\n/)
+      .map((row) => row.trim())
+      .find((row) => row.startsWith(`${packageName} (`));
+    if (!line) return [];
+    const versions = line
+      .replace(`${packageName} (`, "")
+      .replace(")", "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .slice(0, max);
+    return versions.map((version) => ({ version, publishedAt: "" }));
+  }
+
+  if (manager === "apt" || manager === "apt-get") {
+    const result = await runOnTarget(target, `apt-cache madison ${packageName}`, 60000);
+    const versions = (result.output || "")
+      .split(/\r?\n/)
+      .map((line) => line.split("|")[1]?.trim() || "")
+      .filter(Boolean)
+      .slice(0, max);
+    return versions.map((version) => ({ version, publishedAt: "" }));
+  }
+
+  return [];
+}
+
 module.exports = {
   MANAGER_DEFS,
   resolveTarget,
@@ -644,4 +738,5 @@ module.exports = {
   removePin,
   listHistory,
   queryOsvVulnerabilities,
+  listPublishedVersions,
 };

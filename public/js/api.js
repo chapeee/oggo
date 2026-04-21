@@ -139,6 +139,83 @@ const API = {
   deleteSnippet(id) {
     return this.request(`/api/terminal/snippets/${id}`, { method: "DELETE" });
   },
+  listSavedCommands(scope = "global", serverId = "") {
+    const params = new URLSearchParams({ scope });
+    if (serverId) params.set("serverId", serverId);
+    return this.request(`/api/saved-commands?${params.toString()}`);
+  },
+  createSavedCommand(payload) {
+    return this.request("/api/saved-commands", { method: "POST", body: JSON.stringify(payload) });
+  },
+  updateSavedCommand(id, payload) {
+    return this.request(`/api/saved-commands/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+  },
+  deleteSavedCommand(id) {
+    return this.request(`/api/saved-commands/${id}`, { method: "DELETE" });
+  },
+  markSavedCommandUsed(id) {
+    return this.request(`/api/saved-commands/${id}/used`, { method: "POST" });
+  },
+  createCommandCategory(payload) {
+    return this.request("/api/saved-commands/categories", { method: "POST", body: JSON.stringify(payload) });
+  },
+  deleteCommandCategory(id) {
+    return this.request(`/api/saved-commands/categories/${id}`, { method: "DELETE" });
+  },
+  guiRunCommand(payload) {
+    return this.request("/api/terminal-gui/command", { method: "POST", body: JSON.stringify(payload) });
+  },
+  guiListFiles(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/files?${q.toString()}`);
+  },
+  guiResolveSession(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/session?${q.toString()}`);
+  },
+  guiFsList(payload = {}) {
+    return this.request("/api/terminal-gui/fs/list", { method: "POST", body: JSON.stringify(payload) });
+  },
+  guiFsRead(payload = {}) {
+    return this.request("/api/terminal-gui/fs/read", { method: "POST", body: JSON.stringify(payload) });
+  },
+  guiFsWrite(payload = {}) {
+    return this.request("/api/terminal-gui/fs/write", { method: "POST", body: JSON.stringify(payload) });
+  },
+  guiListProcesses(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/processes?${q.toString()}`);
+  },
+  guiKillProcess(payload) {
+    return this.request("/api/terminal-gui/processes/kill", { method: "POST", body: JSON.stringify(payload) });
+  },
+  guiListServices(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/services?${q.toString()}`);
+  },
+  guiServiceAction(payload) {
+    return this.request("/api/terminal-gui/services/action", { method: "POST", body: JSON.stringify(payload) });
+  },
+  guiLogSources(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/logs/sources?${q.toString()}`);
+  },
+  guiReadLog(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/logs/read?${q.toString()}`);
+  },
+  guiDisk(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/disk?${q.toString()}`);
+  },
+  guiFindLargeFiles(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/disk/find-large?${q.toString()}`);
+  },
+  guiNetwork(params = {}) {
+    const q = new URLSearchParams(params);
+    return this.request(`/api/terminal-gui/network?${q.toString()}`);
+  },
   getS3Regions() {
     return this.request("/api/s3/regions");
   },
@@ -225,6 +302,9 @@ const API = {
   getWorkspaces() {
     return this.request("/api/workspaces");
   },
+  getWorkspaceStats(id) {
+    return this.request(`/api/workspaces/${id}/stats`);
+  },
   createWorkspace(payload) {
     return this.request("/api/workspaces", { method: "POST", body: JSON.stringify(payload) });
   },
@@ -237,15 +317,38 @@ const API = {
   deleteWorkspace(id) {
     return this.request(`/api/workspaces/${id}`, { method: "DELETE" });
   },
-  getWorkspaceServices(id) {
-    return this.request(`/api/workspaces/${id}/services`);
+  attachS3ToWorkspace(workspaceId, data) {
+    return this.request(`/api/workspaces/${workspaceId}/s3`, { method: "POST", body: JSON.stringify(data) });
   },
+  attachServiceToWorkspace(workspaceId, data) {
+    return this.request(`/api/workspaces/${workspaceId}/services`, { method: "POST", body: JSON.stringify(data) });
+  },
+  detachServiceFromWorkspace(workspaceId, serviceId) {
+    return this.request(`/api/workspaces/${workspaceId}/services/${serviceId}`, { method: "DELETE" });
+  },
+  // Backward compatibility for existing app.js wiring.
   attachWorkspaceService(id, type, payload) {
-    return this.request(`/api/workspaces/${id}/${type}`, { method: "POST", body: JSON.stringify(payload) });
+    if (type === "s3") return this.attachS3ToWorkspace(id, payload);
+    return this.attachServiceToWorkspace(id, {
+      awsConnectionId: payload.aws_connection_id || payload.awsConnectionId,
+      serviceType: type,
+      serviceIdentifier:
+        payload.service_identifier ||
+        payload.serviceIdentifier ||
+        payload.topic_name ||
+        payload.identity ||
+        payload.name ||
+        payload.instance_identifier ||
+        payload.instance_id ||
+        payload.function_name ||
+        payload.secret_name,
+      friendlyName: payload.friendly_name || payload.friendlyName || null,
+      region: payload.region || null,
+      metadata: payload.metadata || null,
+    });
   },
-  detachWorkspaceService(id, type, serviceId) {
-    const q = new URLSearchParams({ type });
-    return this.request(`/api/workspaces/${id}/services/${serviceId}?${q.toString()}`, { method: "DELETE" });
+  detachWorkspaceService(id, _type, serviceId) {
+    return this.detachServiceFromWorkspace(id, serviceId);
   },
   search(query, options = {}) {
     const params = new URLSearchParams();
@@ -351,6 +454,10 @@ const API = {
   packageVulnerabilities(serverId, params) {
     const q = new URLSearchParams(params || {});
     return this.request(`/api/software/package-manager/${serverId}/vulnerabilities?${q.toString()}`);
+  },
+  packageVersions(serverId, params) {
+    const q = new URLSearchParams(params || {});
+    return this.request(`/api/software/package-manager/${serverId}/versions?${q.toString()}`);
   },
   runInstaller(serverId, payload) {
     return this.request(`/api/software/installer/${serverId}/install`, {

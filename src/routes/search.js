@@ -1,5 +1,5 @@
 const express = require("express");
-const asyncHandler = require("../utils/async-handler");
+const { asyncHandler } = require("../utils/async-handler");
 const { buildSearchIndex, getSearchIndex, searchIndex } = require("../services/searchService");
 
 const router = express.Router();

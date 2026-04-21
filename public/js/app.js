@@ -10,7 +10,7 @@ const state = {
     software: "software-package-manager",
     storage: "s3",
     "developer-tools": "health-checks",
-    aws: "workspaces",
+    aws: "all-workspaces",
     settings: "settings",
   },
   jobs: [],
@@ -23,6 +23,9 @@ const state = {
   packageHistory: [],
   packageFilter: "all",
   packageSearch: "",
+  packageOps: [],
+  packageAutoScanTimer: null,
+  packageAutoScanLastRunAt: 0,
   installerTab: "catalog",
   installerOutput: null,
   awsConnections: [],
@@ -74,6 +77,21 @@ const state = {
   remoteJobs: [],
   keys: [],
   activeTerminalServerId: null,
+  terminalGui: {
+    activeTab: "files",
+    path: "~",
+    showHidden: false,
+    search: "",
+    splitByServer: {},
+    files: null,
+    editor: null,
+    processes: null,
+    services: null,
+    logs: { sources: [], selected: "", content: "" },
+    disk: null,
+    network: null,
+    loading: false,
+  },
 };
 
 const NAV_STRUCTURE = {
@@ -172,6 +190,7 @@ const VIEW_TO_SECTION = {
   "env-vars": "developer-tools",
   "aws-connections": "aws",
   workspaces: "aws",
+  "all-workspaces": "aws",
   "workspace-detail": "aws",
   "aws-cloudwatch": "aws",
   "aws-rds": "aws",
@@ -183,8 +202,13 @@ const VIEW_TO_SECTION = {
 
 let terminalInstance = null;
 let terminalSocket = null;
+let terminalSessionId = null;
+let terminalSocketServerId = null;
 let terminalFitAddon = null;
 let terminalSearchAddon = null;
+let monacoLoadPromise = null;
+let guiMonacoEditor = null;
+let terminalGuiReady = false;
 let terminalCurrentLine = "";
 let terminalSuggestions = [];
 let terminalSuggestionIndex = -1;
@@ -219,6 +243,60 @@ function toast(message, type = "info") {
   node.textContent = message;
   el("toast-container").appendChild(node);
   setTimeout(() => node.remove(), 2800);
+}
+
+function isPermissionDeniedError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("permission denied") || msg.includes("eacces") || msg.includes("not permitted");
+}
+
+function promptSudoAuth() {
+  const modal = el("sudo-modal");
+  const userInput = el("sudo-user");
+  const passInput = el("sudo-password");
+  const cancelBtn = el("sudo-cancel");
+  const closeBtn = el("sudo-close");
+  const confirmBtn = el("sudo-confirm");
+  if (!modal || !passInput || !cancelBtn || !confirmBtn) {
+    return Promise.resolve(null);
+  }
+  modal.classList.remove("hidden");
+  passInput.value = "";
+  if (userInput) userInput.value = "";
+  passInput.focus();
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      modal.classList.add("hidden");
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+      if (closeBtn) closeBtn.onclick = null;
+      modal.onclick = null;
+      passInput.onkeydown = null;
+    };
+    const accept = () => {
+      const sudoUser = String(userInput?.value || "").trim();
+      const sudoPassword = String(passInput.value || "");
+      cleanup();
+      resolve({ sudoUser, sudoPassword });
+    };
+    const cancel = () => {
+      cleanup();
+      resolve(null);
+    };
+    cancelBtn.onclick = cancel;
+    if (closeBtn) closeBtn.onclick = cancel;
+    modal.onclick = (e) => {
+      if (e.target === modal) cancel();
+    };
+    confirmBtn.onclick = accept;
+    passInput.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        accept();
+      }
+      if (e.key === "Escape") cancel();
+    };
+  });
 }
 
 function humanizeCron(expr) {
@@ -257,9 +335,16 @@ function updateTopWorkspaceSwitcher() {
   if (!switcher) return;
   const show =
     state.navSection === "aws" &&
-    ["workspaces", "workspace-detail", "s3-browser", "aws-cloudwatch", "aws-rds", "aws-ec2", "aws-lambda", "aws-secrets"].includes(state.view);
+    ["workspaces", "all-workspaces", "workspace-detail", "s3-browser", "aws-cloudwatch", "aws-rds", "aws-ec2", "aws-lambda", "aws-secrets"].includes(state.view);
   switcher.classList.toggle("hidden", !show);
   if (!show) return;
+  if (window.WorkspacesPage?.renderWorkspaceSwitcher) {
+    switcher.innerHTML = window.WorkspacesPage.renderWorkspaceSwitcher(
+      state.workspaces || [],
+      state.activeWorkspaceId
+    );
+    return;
+  }
   switcher.innerHTML = (state.workspaces || [])
     .map((workspace) => `<option value="${workspace.id}" ${workspace.id === state.activeWorkspaceId ? "selected" : ""}>${workspace.name}</option>`)
     .join("");
@@ -319,7 +404,7 @@ function getAwsContextItems() {
     badge: workspace.total_services ? String(workspace.total_services) : "",
   }));
   return [
-    { view: "workspaces", label: "All Workspaces", icon: "folders", badge: String(state.workspaces.length || 0) },
+    { view: "all-workspaces", label: "All Workspaces", icon: "folders", badge: String(state.workspaces.length || 0) },
     ...workspaceItems,
     { view: "aws-connections", label: "AWS Connections", icon: "key-round", badge: state.awsConnections.length ? String(state.awsConnections.length) : "setup" },
     { action: "new-workspace", label: "New Workspace", icon: "plus-circle", secondary: true },
@@ -1469,53 +1554,418 @@ function httpChecksHtml() {
 }
 
 function terminalHtml() {
+  const serverId = state.activeTerminalServerId || "default";
+  if (state.terminalGui.splitByServer[serverId] === undefined) {
+    const persisted = Number(localStorage.getItem(`oggo.terminal.split.${serverId}`) || 55);
+    state.terminalGui.splitByServer[serverId] = Number.isFinite(persisted) ? persisted : 55;
+  }
+  const split = Number(state.terminalGui.splitByServer[serverId] || 55);
+  const tabs = [
+    ["files", "Files"],
+    ["processes", "Processes"],
+    ["services", "Services"],
+    ["logs", "Logs"],
+    ["disk", "Disk"],
+    ["network", "Network"],
+  ];
+  const tabButtons = tabs
+    .map(
+      ([key, label]) => `
+      <button data-gui-tab="${key}" class="px-2 py-1 rounded-md text-xs ${
+        state.terminalGui.activeTab === key
+          ? "bg-orange-500/10 text-orange-500 border border-orange-500/30"
+          : "text-gray-500 hover:text-gray-900 dark:hover:text-gray-100 border border-transparent"
+      }">${label}</button>
+    `
+    )
+    .join("");
   return `
-    <div class="flex flex-col h-[calc(100vh-100px)]">
-      <div class="flex-1 bg-white dark:bg-[#0d1117] border border-gray-200 dark:border-gray-800 rounded-xl flex flex-col overflow-hidden relative shadow-lg">
-        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between bg-gray-50 dark:bg-[#161b22]">
-          <div class="flex items-center gap-2">
-            <div id="terminal-tab-bar" class="flex items-center gap-2"></div>
-              <button class="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700" title="New Connection" onclick="state.view='servers'; state.navSection='servers'; render(); bindViewEvents();">
-              <i data-lucide="plus" class="w-4 h-4"></i>
-            </button>
-          </div>
-          <div class="flex items-center gap-3 text-gray-500 dark:text-gray-400">
-            <button id="terminal-explain-btn" class="hover:text-white" title="Explain Last Command"><i data-lucide="search" class="w-4 h-4"></i></button>
-            <button id="terminal-clear-btn" class="hover:text-white" title="Clear Terminal"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
-            <button id="terminal-disconnect-btn" class="hover:text-red-500" title="Disconnect"><i data-lucide="x" class="w-4 h-4"></i></button>
-          </div>
+    <div class="flex flex-col h-[calc(100vh-100px)] gap-3">
+      <div class="bg-white dark:bg-[#0d1117] border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 flex items-center justify-between">
+        <div class="flex items-center gap-3 text-xs">
+          <span class="font-semibold">SSH Manager</span>
+          <span class="w-2 h-2 rounded-full ${terminalSocket ? "bg-green-500" : "bg-gray-500"}"></span>
+          <span>${escapeHtml(state.servers.find((item) => item.id === state.activeTerminalServerId)?.name || "No server selected")}</span>
         </div>
-        <div id="terminal-container" class="flex-1 bg-[#0d1117] relative">
-          <div id="terminal-animation-overlay" class="absolute inset-0 z-50 flex items-center justify-center bg-[#0d1117] hidden">
-            <div class="text-center">
-              <img src="https://media1.tenor.com/m/o_wT_K06VwMAAAAd/tom-and-jerry.gif" alt="Connecting..." class="w-48 h-48 object-contain rounded-lg mx-auto mb-4" />
-              <div class="text-orange-500 font-mono text-sm animate-pulse">Connecting to server...</div>
-            </div>
-          </div>
+        <div class="flex items-center gap-2 text-xs text-gray-500">
+          <span id="terminal-session-id" class="font-mono">${terminalSessionId || "-"}</span>
         </div>
-        <div id="terminal-suggestions" class="hidden"></div>
-        <div id="terminal-error-card" class="hidden border-t border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 p-3"></div>
-        <div id="terminal-explain-panel" class="hidden border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#161b22] p-3 max-h-56 overflow-auto text-sm"></div>
-        <div class="px-4 py-2 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#161b22] text-xs flex justify-between items-center text-gray-500">
-          <div class="flex items-center gap-4">
-            <div id="terminal-status-bar" class="flex items-center gap-4">
-              <span id="terminal-status" class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-gray-500"></span>Disconnected</span>
+      </div>
+      <div class="flex-1 min-h-0 bg-white dark:bg-[#0d1117] border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden relative shadow-lg">
+        <div class="h-full flex min-h-0">
+          <section id="terminal-gui-panel" class="min-w-[300px] border-r border-gray-200 dark:border-gray-800 flex flex-col" style="width:${split}%;">
+            <div class="px-3 py-2 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#111318] flex items-center justify-between">
+              <div class="flex items-center gap-1">${tabButtons}</div>
+              <button id="terminal-gui-refresh" class="text-xs px-2 py-1 border border-gray-300 dark:border-gray-700 rounded-md">Refresh</button>
             </div>
-            <div class="hidden xl:flex items-center gap-2 ml-4">
-              <span class="opacity-70">Try typing:</span>
-              <button class="px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition" onclick="document.getElementById('terminal-container').click(); terminalInstance.write('docker '); terminalCurrentLine='docker '; showTerminalSuggestions(state.activeTerminalServerId, 'docker');">docker</button>
-              <button class="px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition" onclick="document.getElementById('terminal-container').click(); terminalInstance.write('git '); terminalCurrentLine='git '; showTerminalSuggestions(state.activeTerminalServerId, 'git');">git</button>
-              <button class="px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition" onclick="document.getElementById('terminal-container').click(); terminalInstance.write('npm '); terminalCurrentLine='npm '; showTerminalSuggestions(state.activeTerminalServerId, 'npm');">npm</button>
-              <button class="px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition" onclick="document.getElementById('terminal-container').click(); terminalInstance.write('grep '); terminalCurrentLine='grep '; showTerminalSuggestions(state.activeTerminalServerId, 'grep');">grep</button>
+            <div id="terminal-gui-content" class="flex-1 overflow-auto p-3 text-xs"></div>
+          </section>
+          <div id="terminal-panel-resizer" class="w-1.5 cursor-col-resize bg-transparent hover:bg-orange-500/30"></div>
+          <section class="flex-1 min-w-[280px] flex flex-col">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between bg-gray-50 dark:bg-[#161b22]">
+              <div class="flex items-center gap-2">
+                <div id="terminal-tab-bar" class="flex items-center gap-2"></div>
+                <button class="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700" title="New Connection" onclick="state.view='servers'; state.navSection='servers'; render(); bindViewEvents();">
+                  <i data-lucide="plus" class="w-4 h-4"></i>
+                </button>
+              </div>
+              <div class="flex items-center gap-3 text-gray-500 dark:text-gray-400">
+                <button id="terminal-explain-btn" class="hover:text-white" title="Explain Last Command"><i data-lucide="search" class="w-4 h-4"></i></button>
+                <button id="terminal-clear-btn" class="hover:text-white" title="Clear Terminal"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                <button id="terminal-disconnect-btn" class="hover:text-red-500" title="Disconnect"><i data-lucide="x" class="w-4 h-4"></i></button>
+              </div>
             </div>
-          </div>
-          <div id="terminal-tldr-status" class="flex items-center gap-2 text-orange-500">
-            <span>tldr loaded</span>
+            <div id="terminal-container" class="flex-1 bg-[#0d1117] relative">
+              <div id="terminal-animation-overlay" class="absolute inset-0 z-50 flex items-center justify-center bg-[#0d1117] hidden">
+                <div class="text-center">
+                  <img src="https://media1.tenor.com/m/o_wT_K06VwMAAAAd/tom-and-jerry.gif" alt="Connecting..." class="w-48 h-48 object-contain rounded-lg mx-auto mb-4" />
+                  <div class="text-orange-500 font-mono text-sm animate-pulse">Connecting to server...</div>
+                </div>
+              </div>
+            </div>
+            <div id="terminal-suggestions" class="hidden"></div>
+            <div id="terminal-error-card" class="hidden border-t border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 p-3"></div>
+            <div id="terminal-explain-panel" class="hidden border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#161b22] p-3 max-h-56 overflow-auto text-sm"></div>
+            <div class="px-3 py-2 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#161b22]">
+              <div class="flex items-center justify-between text-xs text-gray-500">
+                <div id="terminal-status-bar" class="flex items-center gap-3">
+                  <span id="terminal-status" class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-gray-500"></span>Disconnected</span>
+                </div>
+                <span>Shared session</span>
+              </div>
+              <div id="saved-commands-panel" class="mt-2 p-2 border border-gray-200 dark:border-gray-700 rounded-md bg-white/60 dark:bg-black/20">
+                <div class="flex items-center justify-between mb-2">
+                  <div class="flex gap-1 text-[11px]">
+                    <button data-saved-scope="global" class="px-2 py-0.5 rounded border border-gray-300 dark:border-gray-700">Global</button>
+                    <button data-saved-scope="server" class="px-2 py-0.5 rounded border border-gray-300 dark:border-gray-700">This server</button>
+                  </div>
+                  <button id="saved-command-add" class="text-[11px] px-2 py-0.5 rounded border border-gray-300 dark:border-gray-700">Add</button>
+                </div>
+                <div id="saved-commands-list" class="space-y-1 text-[11px]"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
   `;
+}
+
+function detectMonacoLanguage(filePath) {
+  const value = String(filePath || "").toLowerCase();
+  const map = {
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".json": "json",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".py": "python",
+    ".php": "php",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".sql": "sql",
+    ".html": "html",
+    ".css": "css",
+    ".md": "markdown",
+    ".xml": "xml",
+    ".ini": "ini",
+  };
+  const ext = Object.keys(map).find((key) => value.endsWith(key));
+  return ext ? map[ext] : "plaintext";
+}
+
+async function ensureMonacoLoaded() {
+  if (window.monaco?.editor) return window.monaco;
+  if (monacoLoadPromise) return monacoLoadPromise;
+  monacoLoadPromise = new Promise((resolve, reject) => {
+    if (!window.require) {
+      reject(new Error("Monaco loader unavailable"));
+      return;
+    }
+    window.require.config({ paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs" } });
+    window.require(["vs/editor/editor.main"], () => resolve(window.monaco), reject);
+  });
+  return monacoLoadPromise;
+}
+
+async function mountGuiMonacoEditor() {
+  const editorState = state.terminalGui.editor;
+  const mountNode = el("gui-monaco-editor");
+  if (!editorState?.path || !mountNode) return;
+  const monaco = await ensureMonacoLoaded();
+  if (guiMonacoEditor) {
+    guiMonacoEditor.dispose();
+    guiMonacoEditor = null;
+  }
+  guiMonacoEditor = monaco.editor.create(mountNode, {
+    value: editorState.content || "",
+    language: detectMonacoLanguage(editorState.path),
+    theme: document.documentElement.classList.contains("dark") ? "vs-dark" : "vs",
+    automaticLayout: true,
+    minimap: { enabled: true },
+    wordWrap: "on",
+  });
+}
+
+function renderGuiContent() {
+  const node = el("terminal-gui-content");
+  if (!node) return;
+  if (!terminalGuiReady) {
+    node.innerHTML = `<div class="text-gray-500">Connecting to selected server...</div>`;
+    return;
+  }
+  const tab = state.terminalGui.activeTab;
+  if (state.terminalGui.loading) {
+    node.innerHTML = `<div class="text-gray-500">Loading ${tab}...</div>`;
+    return;
+  }
+  if (tab === "files") {
+    if (state.terminalGui.editor?.path) {
+      node.innerHTML = `
+        <div class="space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-xs font-mono truncate">${escapeHtml(state.terminalGui.editor.path)}</div>
+            <div class="flex gap-2">
+              <button id="gui-editor-back" class="btn-secondary !py-1 !px-2 text-xs">Back</button>
+              <button id="gui-editor-save" class="btn-secondary !py-1 !px-2 text-xs">Save</button>
+            </div>
+          </div>
+          <div id="gui-monaco-editor" class="h-[420px] border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden"></div>
+        </div>
+      `;
+      setTimeout(() => {
+        mountGuiMonacoEditor().catch((error) => toast(error.message, "error"));
+      }, 0);
+      return;
+    }
+    const data = state.terminalGui.files;
+    const rows = Array.isArray(data?.entries) ? data.entries : [];
+    const fileRows = rows.length
+      ? rows
+          .map((entry) => {
+            const isDir = entry.type === "directory";
+            const icon = isDir 
+              ? `<svg class="w-3.5 h-3.5 text-[var(--info)] fill-current opacity-80" viewBox="0 0 24 24"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>` 
+              : `<svg class="w-3.5 h-3.5 text-[var(--t3)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M13 2v7h7"/></svg>`;
+            const size = Number(entry.size || 0);
+            const sizeLabel =
+              size > 1024 * 1024
+                ? `${(size / (1024 * 1024)).toFixed(1)}M`
+                : size > 1024
+                  ? `${Math.round(size / 1024)}K`
+                  : `${size}B`;
+            return `<div data-gui-file-open="${escapeHtml(entry.name)}" data-gui-file-type="${entry.type}" class="flex items-center justify-between px-2 py-1.5 cursor-pointer text-[11.5px] font-mono text-[var(--t3)] hover:bg-[var(--bg4)] hover:text-[var(--t2)] transition-colors group select-none">
+              <div class="flex items-center gap-2 min-w-0">
+                ${icon}
+                <span class="truncate group-hover:text-[var(--t)] transition-colors">${escapeHtml(entry.name)}</span>
+              </div>
+              <div class="flex items-center gap-3 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
+                <span class="text-[10px]">${escapeHtml(entry.permissions || "")}</span>
+                <span class="w-10 text-right">${isDir ? '--' : escapeHtml(sizeLabel)}</span>
+              </div>
+            </div>`;
+          })
+          .join("")
+      : `<div class="text-[11px] text-[var(--t3)] p-4 text-center">Empty directory</div>`;
+    node.innerHTML = `
+      <div class="flex flex-col h-full gap-2">
+        <div class="flex items-center gap-1 bg-[var(--bg4)] p-1 rounded-lg border border-[var(--b)]">
+          <button id="gui-files-up" class="p-1 text-[var(--t3)] hover:text-[var(--t)] hover:bg-[var(--bg5)] rounded transition-colors" title="Up one level">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+          <input id="gui-files-path" class="flex-1 bg-transparent border-none text-[11.5px] font-mono text-[var(--t)] px-1 outline-none w-0" value="${escapeHtml(state.terminalGui.path || "~")}" spellcheck="false" />
+          <button id="gui-files-open" class="p-1 text-[var(--t3)] hover:text-[var(--ac)] hover:bg-[var(--acd)] rounded transition-colors" title="Go">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </button>
+          <div class="w-px h-4 bg-[var(--b)] mx-1"></div>
+          <button id="gui-files-new-file" class="p-1 text-[var(--t3)] hover:text-[var(--t)] hover:bg-[var(--bg5)] rounded transition-colors" title="New File">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6M9 15h6"/></svg>
+          </button>
+          <button id="gui-files-new-dir" class="p-1 text-[var(--t3)] hover:text-[var(--t)] hover:bg-[var(--bg5)] rounded transition-colors" title="New Folder">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/><path d="M12 11v6M9 14h6"/></svg>
+          </button>
+        </div>
+        <div class="flex items-center justify-between px-1">
+          <label class="flex items-center gap-1.5 text-[10px] text-[var(--t3)] uppercase font-semibold tracking-wider cursor-pointer hover:text-[var(--t2)] transition-colors">
+            <input id="gui-files-hidden" type="checkbox" class="accent-[var(--ac)] w-3 h-3 rounded" ${state.terminalGui.showHidden ? "checked" : ""} />
+            Show hidden
+          </label>
+          <span class="text-[10px] text-[var(--t3)] font-mono">${rows.length} items</span>
+        </div>
+        <div id="gui-file-list" class="flex-1 overflow-y-auto overflow-x-hidden border border-[var(--b)] rounded-lg bg-[var(--bg3)] py-1 relative">
+          ${fileRows}
+        </div>
+      </div>
+    `;
+    return;
+  }
+  if (tab === "processes") {
+    node.innerHTML = `
+      <div class="space-y-2">
+        <div class="flex gap-2">
+          <button id="gui-proc-refresh" class="btn-secondary !py-1 !px-2 text-xs">Refresh</button>
+          <input id="gui-proc-kill-pid" class="input text-xs !py-1 !px-2" placeholder="PID" />
+          <select id="gui-proc-signal" class="input text-xs !py-1 !px-2"><option value="15">SIGTERM</option><option value="9">SIGKILL</option><option value="1">SIGHUP</option></select>
+          <button id="gui-proc-kill" class="btn-secondary !py-1 !px-2 text-xs">Kill</button>
+        </div>
+        <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[420px]">${escapeHtml(
+          state.terminalGui.processes?.output || "No process data."
+        )}</pre>
+      </div>
+    `;
+    return;
+  }
+  if (tab === "services") {
+    node.innerHTML = `
+      <div class="space-y-2">
+        <div class="flex gap-2">
+          <button id="gui-svc-refresh" class="btn-secondary !py-1 !px-2 text-xs">Refresh</button>
+          <input id="gui-svc-name" class="input text-xs !py-1 !px-2" placeholder="nginx.service" />
+          <select id="gui-svc-action" class="input text-xs !py-1 !px-2"><option>restart</option><option>start</option><option>stop</option><option>reload</option><option>enable</option><option>disable</option></select>
+          <button id="gui-svc-run" class="btn-secondary !py-1 !px-2 text-xs">Run</button>
+        </div>
+        <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[420px]">${escapeHtml(
+          state.terminalGui.services?.output || "No service data."
+        )}</pre>
+      </div>
+    `;
+    return;
+  }
+  if (tab === "logs") {
+    const sources = state.terminalGui.logs.sources || [];
+    const options = sources
+      .map((item) => `<option value="${escapeHtml(item)}" ${item === state.terminalGui.logs.selected ? "selected" : ""}>${escapeHtml(item)}</option>`)
+      .join("");
+    node.innerHTML = `
+      <div class="space-y-2">
+        <div class="flex gap-2">
+          <button id="gui-logs-sources" class="btn-secondary !py-1 !px-2 text-xs">Detect sources</button>
+          <select id="gui-logs-path" class="input text-xs !py-1 !px-2 flex-1"><option value="">Choose log file</option>${options}</select>
+          <button id="gui-logs-open" class="btn-secondary !py-1 !px-2 text-xs">Tail 100</button>
+        </div>
+        <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[420px]">${escapeHtml(
+          state.terminalGui.logs.content || "No logs loaded."
+        )}</pre>
+      </div>
+    `;
+    return;
+  }
+  if (tab === "disk") {
+    node.innerHTML = `
+      <div class="space-y-2">
+        <div class="flex gap-2">
+          <input id="gui-disk-path" class="input text-xs !py-1 !px-2" value="/" />
+          <button id="gui-disk-refresh" class="btn-secondary !py-1 !px-2 text-xs">Refresh</button>
+          <button id="gui-disk-large" class="btn-secondary !py-1 !px-2 text-xs">Find large files</button>
+        </div>
+        <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[200px]">${escapeHtml(
+          state.terminalGui.disk?.overview?.output || "No disk overview."
+        )}</pre>
+        <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[200px]">${escapeHtml(
+          state.terminalGui.disk?.usage?.output || "No folder usage."
+        )}</pre>
+      </div>
+    `;
+    return;
+  }
+  node.innerHTML = `
+    <div class="space-y-2">
+      <button id="gui-net-refresh" class="btn-secondary !py-1 !px-2 text-xs">Refresh</button>
+      <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[180px]">${escapeHtml(
+        state.terminalGui.network?.interfaces?.output || "No interface data."
+      )}</pre>
+      <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[180px]">${escapeHtml(
+        state.terminalGui.network?.connections?.output || "No connection data."
+      )}</pre>
+      <pre class="text-[11px] bg-black/70 text-gray-100 p-2 rounded-md overflow-auto max-h-[180px]">${escapeHtml(
+        state.terminalGui.network?.ports?.output || "No open ports."
+      )}</pre>
+    </div>
+  `;
+}
+
+async function loadActiveTerminalGuiTab(force = false) {
+  if (!terminalSessionId) return;
+  const tab = state.terminalGui.activeTab;
+  if (!force && tab === "files" && state.terminalGui.files) {
+    renderGuiContent();
+    return;
+  }
+  state.terminalGui.loading = true;
+  renderGuiContent();
+  const sessionId = terminalSessionId;
+  try {
+    if (tab === "files") {
+      state.terminalGui.files = await window.OggoAPI.guiFsList({
+        sessionId,
+        serverId: state.activeTerminalServerId,
+        path: state.terminalGui.path || "~",
+        showHidden: Boolean(state.terminalGui.showHidden),
+      });
+    } else if (tab === "processes") {
+      state.terminalGui.processes = await window.OggoAPI.guiListProcesses({ sessionId });
+    } else if (tab === "services") {
+      state.terminalGui.services = await window.OggoAPI.guiListServices({ sessionId });
+    } else if (tab === "logs") {
+      const sources = await window.OggoAPI.guiLogSources({ sessionId });
+      state.terminalGui.logs.sources = sources.paths || [];
+    } else if (tab === "disk") {
+      state.terminalGui.disk = await window.OggoAPI.guiDisk({ sessionId, path: "/" });
+    } else if (tab === "network") {
+      state.terminalGui.network = await window.OggoAPI.guiNetwork({ sessionId });
+    }
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.terminalGui.loading = false;
+    renderGuiContent();
+  }
+}
+
+async function loadSavedCommands(scope = "global") {
+  const listNode = el("saved-commands-list");
+  if (!listNode) return;
+  const serverId = scope === "server" ? state.activeTerminalServerId : "";
+  try {
+    const data = await window.OggoAPI.listSavedCommands(scope, serverId);
+    const commands = data.commands || [];
+    if (!commands.length) {
+      listNode.innerHTML = `<div class="text-gray-500">No saved commands.</div>`;
+      return;
+    }
+    const grouped = commands.reduce((acc, item) => {
+      const key = String(item.category || "Uncategorized").trim() || "Uncategorized";
+      acc[key] = acc[key] || [];
+      acc[key].push(item);
+      return acc;
+    }, {});
+    const sections = Object.entries(grouped)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(
+        ([category, items]) => `<details open class="p-1 border border-gray-200 dark:border-gray-700 rounded">
+          <summary class="cursor-pointer text-[11px] font-semibold">${escapeHtml(category)} (${items.length})</summary>
+          <div class="mt-1 space-y-1">
+            ${items
+              .map(
+                (item) => `<div class="p-1 border border-gray-200 dark:border-gray-700 rounded">
+                  <div class="font-medium">${escapeHtml(item.name || "")}</div>
+                  <div class="font-mono text-gray-500 truncate">${escapeHtml(item.command || "")}</div>
+                  <div class="mt-1 flex gap-1">
+                    <button data-saved-run="${item.id}" class="px-2 py-0.5 border border-gray-300 dark:border-gray-700 rounded">Run</button>
+                    <button data-saved-delete="${item.id}" class="px-2 py-0.5 border border-gray-300 dark:border-gray-700 rounded">Delete</button>
+                  </div>
+                </div>`
+              )
+              .join("")}
+          </div>
+        </details>`
+      )
+      .join("");
+    listNode.innerHTML = sections;
+  } catch (error) {
+    listNode.innerHTML = `<div class="text-red-500">${escapeHtml(error.message)}</div>`;
+  }
 }
 
 function settingsHtml() {
@@ -1543,6 +1993,17 @@ function settingsHtml() {
             <span class="text-sm text-gray-700 dark:text-gray-300">Enable password</span>
             ${toggle("passwordEnabled", s.passwordEnabled)}
           </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3 class="section-title"><i data-lucide="package-search" class="w-5 h-5"></i> Package Monitor</h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="pt-4 flex items-center justify-between">
+            <span class="text-sm text-gray-700 dark:text-gray-300">Auto-scan daily for vulnerabilities</span>
+            ${toggle("software.autoScanDaily", Boolean(s.software?.autoScanDaily))}
+          </div>
+          ${field("Auto-scan server", `<select name="software.autoScanServerId" class="input bg-white dark:bg-gray-800"><option value="local" ${String(s.software?.autoScanServerId || "local") === "local" ? "selected" : ""}>Local Machine</option>${state.servers.map((srv) => `<option value="${srv.id}" ${String(s.software?.autoScanServerId || "") === srv.id ? "selected" : ""}>${escapeHtml(srv.name)}</option>`).join("")}</select>`)}
         </div>
       </section>
 
@@ -1668,18 +2129,63 @@ function softwareServerOptionsHtml() {
     .join("");
 }
 
-function packageRowsHtml(packages) {
+function getFilteredPackages(packages) {
   const q = String(state.packageSearch || "").trim().toLowerCase();
-  const filtered = packages
+  return packages
     .filter((pkg) => {
       if (q && !String(pkg.name || "").toLowerCase().includes(q)) return false;
       if (state.packageFilter === "outdated") return pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion;
       if (state.packageFilter === "vulnerable") return Number(pkg.vulnCount || 0) > 0;
       if (state.packageFilter === "pinned") return Boolean(pkg.pinned);
-      if (state.packageFilter === "uptodate") return !pkg.latestVersion || pkg.latestVersion === pkg.installedVersion;
       return true;
     })
     .slice(0, 500);
+}
+
+function packageCounts(packages) {
+  return packages.reduce(
+    (acc, pkg) => {
+      if (pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion) acc.outdated += 1;
+      if (Number(pkg.vulnCount || 0) > 0) acc.vulnerable += 1;
+      if (pkg.pinned) acc.pinned += 1;
+      acc.total += 1;
+      return acc;
+    },
+    { total: 0, outdated: 0, vulnerable: 0, pinned: 0 }
+  );
+}
+
+function operationPanelHtml() {
+  const active = state.packageOps.find((item) => item.status === "running");
+  if (!active) return "";
+  const panelTone =
+    active.status === "failed"
+      ? "border-red-500/40"
+      : active.status === "success"
+        ? "border-green-500/40"
+        : "border-orange-500/30";
+  const progress = Math.max(5, Math.min(100, Number(active.progress || 0)));
+  const output = String(active.output || "").trim();
+  return `
+    <div class="mt-3 p-3 rounded-xl border ${panelTone} bg-[#0d1117] text-gray-100">
+      <div class="flex items-center justify-between text-xs">
+        <div>
+          <span class="font-semibold">${escapeHtml(active.packageName)}</span>
+          <span class="text-gray-400 ml-2">${escapeHtml(active.operation)}</span>
+        </div>
+        <div class="${active.status === "success" ? "text-green-400" : active.status === "failed" ? "text-red-400" : "text-orange-300"}">${escapeHtml(active.status.toUpperCase())}</div>
+      </div>
+      <div class="h-2 bg-gray-800 rounded mt-2 overflow-hidden">
+        <div class="h-full ${active.status === "failed" ? "bg-red-500" : active.status === "success" ? "bg-green-500" : "bg-orange-500"} transition-all duration-500" style="width:${progress}%"></div>
+      </div>
+      <pre class="text-[11px] leading-5 mt-2 max-h-40 overflow-auto whitespace-pre-wrap">${escapeHtml(output || "Running...")}</pre>
+      ${active.status === "failed" ? `<div class="pt-2"><button class="btn-secondary text-xs" data-package-retry="${active.id}">Retry</button></div>` : ""}
+    </div>
+  `;
+}
+
+function packageRowsHtml(packages) {
+  const filtered = getFilteredPackages(packages);
 
   return filtered
     .map((pkg) => {
@@ -1694,17 +2200,20 @@ function packageRowsHtml(packages) {
               : "bg-gray-500/20 text-gray-400";
       return `
         <tr class="border-b border-gray-100 dark:border-gray-800">
-          <td class="py-2 px-3 font-medium">${escapeHtml(pkg.name)}</td>
+          <td class="py-2 px-3">
+            <div class="font-medium">${escapeHtml(pkg.name)}</div>
+            <div class="text-[11px] text-gray-500 mt-0.5">${escapeHtml(pkg.description || "No description available")}</div>
+          </td>
           <td class="py-2 px-3 text-xs">${escapeHtml(pkg.installedVersion || "-")}</td>
           <td class="py-2 px-3 text-xs ${hasUpdate ? "text-orange-500" : "text-gray-500"}">${escapeHtml(pkg.latestVersion || pkg.installedVersion || "-")}</td>
           <td class="py-2 px-3"><span class="px-2 py-1 rounded-full text-[11px] ${updateTypeClass}">${escapeHtml(pkg.updateType || "NONE")}</span></td>
-          <td class="py-2 px-3">${Number(pkg.vulnCount || 0) > 0 ? `<span class="px-2 py-1 rounded-full text-[11px] bg-red-500/20 text-red-500">${Number(pkg.vulnCount)} CVE</span>` : `<span class="text-xs text-gray-500">-</span>`}</td>
+          <td class="py-2 px-3">${Number(pkg.vulnCount || 0) > 0 ? `<button class="px-2 py-1 rounded-full text-[11px] bg-red-500/20 text-red-500 hover:bg-red-500/30" data-package-action="vulns" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">${Number(pkg.vulnCount)} CVE</button>` : `<span class="text-xs text-gray-500">-</span>`}</td>
           <td class="py-2 px-3 text-right">
             <div class="inline-flex gap-2">
-              ${hasUpdate ? `<button class="btn-secondary text-xs" data-package-action="update" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-from="${escapeHtml(pkg.installedVersion || "")}" data-to="${escapeHtml(pkg.latestVersion || "")}">Update</button>` : ""}
-              <button class="btn-secondary text-xs" data-package-action="${pkg.pinned ? "unpin" : "pin"}" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">${pkg.pinned ? "Unpin" : "Pin"}</button>
+              ${hasUpdate ? `<button class="btn-secondary text-xs" data-package-action="update" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-from="${escapeHtml(pkg.installedVersion || "")}" data-to="${escapeHtml(pkg.latestVersion || "")}" data-type="${escapeHtml(pkg.updateType || "UNKNOWN")}">Update</button>` : ""}
+              <button class="btn-secondary text-xs" data-package-action="${pkg.pinned ? "unpin" : "pin"}" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">${pkg.pinned ? `<span class="text-orange-500">📌</span> Unpin` : "Pin"}</button>
+              <button class="btn-secondary text-xs" data-package-action="versions" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">Versions</button>
               <button class="btn-secondary text-xs text-red-500" data-package-action="uninstall" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}">Uninstall</button>
-              <button class="btn-secondary text-xs" data-package-action="vulns" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">Vulns</button>
             </div>
           </td>
         </tr>
@@ -1716,6 +2225,12 @@ function packageRowsHtml(packages) {
 function softwarePackageManagerHtml() {
   const scan = state.packageScan;
   const hasScan = Boolean(scan && Array.isArray(scan.sections));
+  const counts = packageCounts((scan?.sections || []).flatMap((section) => section.packages || []));
+  const total = Math.max(1, Number(counts.total || 0));
+  const updatesPct = Math.round(((counts.outdated || 0) / total) * 100);
+  const vulnPct = Math.round(((counts.vulnerable || 0) / total) * 100);
+  const filterPill = (key, label, count) =>
+    `<button data-package-filter-pill="${key}" class="px-3 py-1.5 rounded-full border text-xs ${state.packageFilter === key ? "border-orange-500 text-orange-500 bg-orange-500/10" : "border-gray-300 dark:border-gray-700 text-gray-500 hover:text-gray-200"}">${label} (${count})</button>`;
   const sections = hasScan
     ? scan.sections
         .map(
@@ -1726,7 +2241,10 @@ function softwarePackageManagerHtml() {
             <div class="font-semibold">${escapeHtml(section.managerLabel)} <span class="text-xs text-gray-500">(${escapeHtml(section.managerVersion || "Unknown")})</span></div>
             <div class="text-xs text-gray-500">${section.packageCount} packages • ${section.outdatedCount} outdated • ${section.vulnerableCount} vulnerable</div>
           </div>
-          <button class="btn-secondary text-xs" data-scan-manager="${section.manager}">Scan Section</button>
+          <div class="inline-flex gap-2">
+            <button class="btn-secondary text-xs" data-package-action="bulk-update" data-manager="${section.manager}">Bulk update</button>
+            <button class="btn-secondary text-xs" data-scan-manager="${section.manager}">Scan Section</button>
+          </div>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
@@ -1763,21 +2281,30 @@ function softwarePackageManagerHtml() {
           <button id="software-history-btn" class="btn-secondary">History</button>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
-          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg px-3 py-2"><div class="text-xs text-gray-500">Total packages</div><div class="text-xl font-semibold">${scan?.stats?.totalPackages || 0}</div></div>
-          <div class="bg-orange-500/10 rounded-lg px-3 py-2"><div class="text-xs text-orange-400">Updates available</div><div class="text-xl font-semibold text-orange-500">${scan?.stats?.updatesAvailable || 0}</div></div>
-          <div class="bg-red-500/10 rounded-lg px-3 py-2"><div class="text-xs text-red-400">Vulnerabilities</div><div class="text-xl font-semibold text-red-500">${scan?.stats?.vulnerabilities || 0}</div></div>
+          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg px-3 py-2">
+            <div class="text-xs text-gray-500">Total packages</div><div class="text-xl font-semibold">${scan?.stats?.totalPackages || 0}</div>
+            <div class="h-1.5 rounded bg-gray-200 dark:bg-gray-700 mt-2 overflow-hidden"><div class="h-full bg-blue-500" style="width:100%"></div></div>
+          </div>
+          <div class="bg-orange-500/10 rounded-lg px-3 py-2">
+            <div class="text-xs text-orange-400">Updates available</div><div class="text-xl font-semibold text-orange-500">${scan?.stats?.updatesAvailable || 0}</div>
+            <div class="h-1.5 rounded bg-orange-900/30 mt-2 overflow-hidden"><div class="h-full bg-orange-500" style="width:${updatesPct}%"></div></div>
+          </div>
+          <div class="bg-red-500/10 rounded-lg px-3 py-2">
+            <div class="text-xs text-red-400">Vulnerabilities</div><div class="text-xl font-semibold text-red-500">${scan?.stats?.vulnerabilities || 0}</div>
+            <div class="h-1.5 rounded bg-red-900/30 mt-2 overflow-hidden"><div class="h-full bg-red-500" style="width:${vulnPct}%"></div></div>
+          </div>
           <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg px-3 py-2"><div class="text-xs text-gray-500">Last scan</div><div class="text-sm font-semibold">${scan?.scannedAt ? new Date(scan.scannedAt).toLocaleString() : "Not scanned"}</div></div>
         </div>
-        <div class="flex flex-wrap gap-3 mt-4">
+        <div class="flex flex-wrap gap-3 mt-4 items-center">
           <input id="software-package-search" class="input min-w-[220px] max-w-sm" placeholder="Search package..." value="${escapeHtml(state.packageSearch || "")}" />
-          <select id="software-package-filter" class="input bg-white dark:bg-gray-800 max-w-[220px]">
-            <option value="all" ${state.packageFilter === "all" ? "selected" : ""}>All</option>
-            <option value="outdated" ${state.packageFilter === "outdated" ? "selected" : ""}>Outdated</option>
-            <option value="vulnerable" ${state.packageFilter === "vulnerable" ? "selected" : ""}>Vulnerable</option>
-            <option value="uptodate" ${state.packageFilter === "uptodate" ? "selected" : ""}>Up to date</option>
-            <option value="pinned" ${state.packageFilter === "pinned" ? "selected" : ""}>Pinned</option>
-          </select>
+          <div class="flex flex-wrap gap-2">
+            ${filterPill("all", "All", counts.total)}
+            ${filterPill("outdated", "Updates", counts.outdated)}
+            ${filterPill("vulnerable", "Vulnerable", counts.vulnerable)}
+            ${filterPill("pinned", "Pinned", counts.pinned)}
+          </div>
         </div>
+        ${operationPanelHtml()}
       </div>
       ${sections}
     </div>
@@ -1918,7 +2445,7 @@ function render() {
     root.innerHTML = s3ConnectionsHtml();
   } else if (state.view === "s3-browser") {
     root.innerHTML = s3BrowserHtml();
-  } else if (state.view === "workspaces") {
+  } else if (state.view === "workspaces" || state.view === "all-workspaces") {
     root.innerHTML = workspacesOverviewHtml();
   } else if (state.view === "workspace-detail") {
     root.innerHTML = workspaceDetailHtml();
@@ -2112,6 +2639,37 @@ async function refreshData() {
   }
 }
 
+async function maybeRunSoftwareAutoScan(force = false) {
+  if (!state.settings?.software?.autoScanDaily) return;
+  const now = Date.now();
+  if (!force && now - Number(state.packageAutoScanLastRunAt || 0) < 24 * 60 * 60 * 1000) return;
+  const serverId = String(state.settings?.software?.autoScanServerId || "local");
+  try {
+    const previousVulns = Number(localStorage.getItem(`oggo.software.vulns.${serverId}`) || "0");
+    const scan = await window.OggoAPI.scanPackages(serverId);
+    const nextVulns = Number(scan?.stats?.vulnerabilities || 0);
+    localStorage.setItem(`oggo.software.vulns.${serverId}`, String(nextVulns));
+    state.packageAutoScanLastRunAt = now;
+    if (nextVulns > previousVulns) {
+      toast(`Auto-scan: ${nextVulns - previousVulns} new vulnerabilities found`, "error");
+    }
+  } catch (_error) {
+    // Ignore autoscan errors to avoid interrupting app boot.
+  }
+}
+
+function configureSoftwareAutoScan() {
+  if (state.packageAutoScanTimer) {
+    clearInterval(state.packageAutoScanTimer);
+    state.packageAutoScanTimer = null;
+  }
+  if (!state.settings?.software?.autoScanDaily) return;
+  maybeRunSoftwareAutoScan(false).catch(() => {});
+  state.packageAutoScanTimer = setInterval(() => {
+    maybeRunSoftwareAutoScan(false).catch(() => {});
+  }, 60 * 60 * 1000);
+}
+
 async function loadWorkspaceDetail(workspaceId) {
   if (!workspaceId) return;
   state.workspaceDetail = await window.OggoAPI.getWorkspace(workspaceId);
@@ -2187,7 +2745,7 @@ function openWorkspaceModal(workspace = null) {
         await loadWorkspaceDetail(saved.id);
         state.view = "workspace-detail";
       } else {
-        state.view = "workspaces";
+        state.view = "all-workspaces";
       }
       render();
       bindViewEvents();
@@ -2206,6 +2764,138 @@ async function scanSoftware(manager = "") {
 
 async function refreshSoftwareHistory() {
   state.packageHistory = await window.OggoAPI.packageHistory(state.softwareServerId, 150);
+}
+
+function changelogUrlForPackage(manager, packageName) {
+  if (manager === "npm" || manager === "yarn") return `https://www.npmjs.com/package/${encodeURIComponent(packageName)}`;
+  if (manager === "pip" || manager === "pip3") return `https://pypi.org/project/${encodeURIComponent(packageName)}/`;
+  if (manager === "composer") return `https://packagist.org/packages/${encodeURIComponent(packageName)}`;
+  if (manager === "gem") return `https://rubygems.org/gems/${encodeURIComponent(packageName)}`;
+  return "";
+}
+
+function startPackageOperation(operation, manager, packageName, payload) {
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const op = { id, operation, manager, packageName, payload, status: "running", progress: 12, output: "" };
+  state.packageOps = [op, ...state.packageOps].slice(0, 20);
+  render();
+  bindViewEvents();
+  const timer = setInterval(() => {
+    const row = state.packageOps.find((item) => item.id === id);
+    if (!row || row.status !== "running") return clearInterval(timer);
+    row.progress = Math.min(85, row.progress + 8);
+    render();
+    bindViewEvents();
+  }, 350);
+  return { id, timer };
+}
+
+function finishPackageOperation(opId, timer, result, error) {
+  clearInterval(timer);
+  const row = state.packageOps.find((item) => item.id === opId);
+  if (!row) return;
+  if (error) {
+    row.status = "failed";
+    row.progress = 100;
+    row.output = String(error?.message || error || "Operation failed");
+  } else {
+    row.status = result?.status === "success" ? "success" : "failed";
+    row.progress = 100;
+    row.output = [result?.output || "", result?.errorOutput || ""].filter(Boolean).join("\n") || (row.status === "success" ? "Done." : "Failed.");
+  }
+  render();
+  bindViewEvents();
+}
+
+async function confirmPackageUpdate(manager, packageName, fromVersion, toVersion, updateType) {
+  const fromV = fromVersion || "?";
+  const toV = toVersion || "latest";
+  if (updateType === "PATCH") {
+    return confirm(`PATCH update\nPackage: ${packageName}\nFrom: ${fromV}\nTo: ${toV}\nRisk: Safe`);
+  }
+  if (updateType === "MINOR") {
+    const changelog = changelogUrlForPackage(manager, packageName);
+    return confirm(`MINOR update\nPackage: ${packageName}\nFrom: ${fromV}\nTo: ${toV}\nWarning: May include new APIs.${changelog ? `\nChangelog: ${changelog}` : ""}`);
+  }
+  if (updateType === "MAJOR") {
+    const typed = prompt(`MAJOR update\nPackage: ${packageName}\nFrom: ${fromV}\nTo: ${toV}\nBreaking changes likely. Test staging first.\n\nType package name to confirm:`);
+    return typed === packageName;
+  }
+  return confirm(`Update ${packageName} (${fromV} -> ${toV})?`);
+}
+
+async function runPackageOperationWithProgress(manager, packageName, action, extra = {}) {
+  const op = startPackageOperation(action, manager, packageName, { manager, packageName, action, ...extra, triggeredBy: "ui" });
+  try {
+    const result = await window.OggoAPI.packageOperation(state.softwareServerId, {
+      manager,
+      packageName,
+      action,
+      ...extra,
+      triggeredBy: "ui",
+    });
+    finishPackageOperation(op.id, op.timer, result, null);
+    state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
+    return result;
+  } catch (error) {
+    finishPackageOperation(op.id, op.timer, null, error);
+    throw error;
+  }
+}
+
+function openPackageVersionsModal(manager, packageName, installedVersion) {
+  return window.OggoAPI
+    .packageVersions(state.softwareServerId, { manager, packageName, limit: 5 })
+    .then((versions) => {
+      const modal = el("job-modal");
+      const body = el("job-modal-body");
+      const rows = Array.isArray(versions) ? versions : [];
+      body.innerHTML = `
+        <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+          <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Versions: ${escapeHtml(packageName)}</h3>
+          <button type="button" id="pkg-versions-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-4 max-h-[70vh] overflow-auto">
+          <div class="text-xs text-gray-500 mb-2">Installed: ${escapeHtml(installedVersion || "-")}</div>
+          <div class="space-y-2">
+            ${
+              rows
+                .map(
+                  (row) => `<button class="w-full text-left border border-gray-200 dark:border-gray-700 rounded-lg p-3 hover:border-orange-500" data-downgrade-version="${escapeHtml(row.version)}" data-downgrade-manager="${escapeHtml(manager)}" data-downgrade-package="${escapeHtml(packageName)}">
+                    <div class="font-semibold">${escapeHtml(row.version)}</div>
+                    <div class="text-xs text-gray-500 mt-1">${row.publishedAt ? new Date(row.publishedAt).toLocaleString() : "Release date not available"}</div>
+                  </button>`
+                )
+                .join("") || '<div class="text-sm text-gray-500">No versions found for this manager.</div>'
+            }
+          </div>
+        </div>
+      `;
+      modal.classList.remove("hidden");
+      if (window.lucide) window.lucide.createIcons();
+      el("pkg-versions-close").onclick = () => modal.classList.add("hidden");
+      body.querySelectorAll("[data-downgrade-version]").forEach((btn) => {
+        btn.onclick = async () => {
+          const version = btn.dataset.downgradeVersion;
+          if (!version) return;
+          if (!confirm(`Downgrade ${packageName} to ${version}?`)) return;
+          modal.classList.add("hidden");
+          try {
+            const result = await runPackageOperationWithProgress(manager, packageName, "install", {
+              version,
+              fromVersion: installedVersion || "",
+              toVersion: version,
+            });
+            toast(result.status === "success" ? "Version reverted" : "Version revert failed", result.status === "success" ? "success" : "error");
+            await scanSoftware();
+            render();
+            bindViewEvents();
+          } catch (error) {
+            toast(error.message, "error");
+          }
+        };
+      });
+    });
 }
 
 function openJobModal(job = null) {
@@ -2953,13 +3643,28 @@ function connectTerminal(serverId) {
   const server = state.servers.find((s) => s.id === serverId);
   if (!container || !server) return;
 
+  if (
+    terminalSocket &&
+    terminalSocketServerId === serverId &&
+    (terminalSocket.readyState === WebSocket.OPEN || terminalSocket.readyState === WebSocket.CONNECTING) &&
+    terminalInstance
+  ) {
+    return;
+  }
+
   state.activeTerminalServerId = serverId;
   statusNode.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>Connecting...`;
+  terminalGuiReady = false;
+  state.terminalGui.loading = false;
+  state.terminalGui.files = null;
+  state.terminalGui.editor = null;
+  renderGuiContent();
 
   if (terminalSocket) {
     terminalSocket.close();
     terminalSocket = null;
   }
+  terminalSessionId = null;
   if (terminalInstance) {
     terminalInstance.dispose();
     terminalInstance = null;
@@ -2985,14 +3690,14 @@ function connectTerminal(serverId) {
       white: "#b1bac4",
     },
   });
-  const fit = new window.FitAddon.FitAddon();
-  const webLinksAddon = new window.WebLinksAddon.WebLinksAddon();
-  const searchAddon = new window.SearchAddon.SearchAddon();
-  term.loadAddon(fit);
-  term.loadAddon(webLinksAddon);
-  term.loadAddon(searchAddon);
+  const fit = window.FitAddon ? new window.FitAddon.FitAddon() : null;
+  const webLinksAddon = window.WebLinksAddon ? new window.WebLinksAddon.WebLinksAddon() : null;
+  const searchAddon = window.SearchAddon ? new window.SearchAddon.SearchAddon() : null;
+  if (fit) term.loadAddon(fit);
+  if (webLinksAddon) term.loadAddon(webLinksAddon);
+  if (searchAddon) term.loadAddon(searchAddon);
   term.open(container);
-  fit.fit();
+  if (fit) fit.fit();
   term.writeln("\r\n  Connecting to server...\r\n");
 
   const overlay = el("terminal-animation-overlay");
@@ -3001,14 +3706,17 @@ function connectTerminal(serverId) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${protocol}//${window.location.host}/terminal/${serverId}`);
   terminalSocket = ws;
+  terminalSocketServerId = serverId;
   terminalInstance = term;
   terminalFitAddon = fit;
-  terminalSearchAddon = searchAddon;
+  terminalSearchAddon = searchAddon || null;
   terminalCurrentLine = "";
   terminalSuggestions = [];
   terminalSuggestionIndex = -1;
 
   ws.onopen = () => {
+    terminalGuiReady = true;
+    renderGuiContent();
     statusNode.innerHTML = `<span class="w-2 h-2 rounded-full bg-green-500"></span>Connected: ${server.username}@${server.host}`;
     if (overlay) overlay.classList.add("hidden");
   };
@@ -3022,6 +3730,9 @@ function connectTerminal(serverId) {
       }
       if (msg.type === "error_card") renderTerminalErrorCard(msg.data);
       if (msg.type === "status" && msg.status === "connected") {
+        terminalSessionId = msg.sessionId || terminalSessionId;
+        const sessionNode = el("terminal-session-id");
+        if (sessionNode) sessionNode.textContent = terminalSessionId || "-";
         term.writeln("\r\nConnected.\r\n");
         const prefill = localStorage.getItem("oggo.terminal.prefill");
         if (prefill) {
@@ -3031,6 +3742,8 @@ function connectTerminal(serverId) {
           localStorage.removeItem("oggo.terminal.prefill");
         }
         if (overlay) overlay.classList.add("hidden");
+        loadActiveTerminalGuiTab(true).catch(() => {});
+        loadSavedCommands("global").catch(() => {});
       }
     } catch (_error) {
       term.write(event.data);
@@ -3038,7 +3751,15 @@ function connectTerminal(serverId) {
   };
   ws.onclose = () => {
     statusNode.innerHTML = `<span class="w-2 h-2 rounded-full bg-gray-500"></span>Disconnected: ${server.name}`;
+    terminalSessionId = null;
+    terminalSocketServerId = null;
+    terminalGuiReady = false;
+    state.terminalGui.files = null;
+    state.terminalGui.editor = null;
+    const sessionNode = el("terminal-session-id");
+    if (sessionNode) sessionNode.textContent = "-";
     if (overlay) overlay.classList.add("hidden");
+    renderGuiContent();
   };
   ws.onerror = () => {
     statusNode.innerHTML = `<span class="w-2 h-2 rounded-full bg-red-500"></span>Connection error`;
@@ -3103,6 +3824,10 @@ function connectTerminal(serverId) {
     }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "f") {
       event.preventDefault();
+      if (!terminalSearchAddon) {
+        toast("Search addon not loaded in this browser session", "info");
+        return false;
+      }
       const q = prompt("Search in terminal");
       if (q) terminalSearchAddon.findNext(q);
       return false;
@@ -3111,9 +3836,11 @@ function connectTerminal(serverId) {
   });
   term.onResize(({ cols, rows }) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
-    fit.fit();
+    if (terminalFitAddon) terminalFitAddon.fit();
   });
-  window.addEventListener("resize", () => fit.fit());
+  window.addEventListener("resize", () => {
+    if (terminalFitAddon) terminalFitAddon.fit();
+  });
 }
 
 function renderTerminalErrorCard(errorData) {
@@ -3484,48 +4211,23 @@ function renderGlobalSearchOverlay() {
 }
 
 async function performGlobalSearch() {
-  const query = String(state.globalSearch.query || "").trim().toLowerCase();
+  const query = String(state.globalSearch.query || "").trim();
   if (!query) {
     state.globalSearch.groupedResults = [];
     renderGlobalSearchOverlay();
     return;
   }
-  if (!state.globalSearch.indexItems.length) {
-    const index = await window.OggoAPI.getSearchIndex();
-    state.globalSearch.indexItems = index.items || [];
-    state.globalSearch.indexBuiltAt = index.builtAt || null;
+  try {
+    const result = await window.OggoAPI.search(query, {
+      workspaceId: state.activeWorkspaceId || "",
+      maxPerGroup: 20,
+    });
+    state.globalSearch.groupedResults = result.grouped || [];
+    state.globalSearch.indexBuiltAt = result.builtAt || null;
+  } catch (error) {
+    state.globalSearch.groupedResults = [];
+    toast(error.message || "Search failed", "error");
   }
-
-  const rank = (item) => {
-    const title = String(item.title || "").toLowerCase();
-    const desc = String(item.description || "").toLowerCase();
-    const keywords = Array.isArray(item.keywords)
-      ? item.keywords.join(" ").toLowerCase()
-      : String(item.keywords || "").toLowerCase();
-    if (title === query) return 100;
-    if (title.startsWith(query)) return 80;
-    if (title.includes(query)) return 60;
-    if (desc.includes(query) || keywords.includes(query)) return 40;
-    return 0;
-  };
-  const scored = state.globalSearch.indexItems
-    .map((item) => ({ ...item, _score: rank(item) }))
-    .filter((item) => item._score > 0)
-    .sort((a, b) => b._score - a._score);
-
-  const groupedMap = {};
-  for (const item of scored) {
-    if (!groupedMap[item.category]) groupedMap[item.category] = [];
-    if (groupedMap[item.category].length < 4) {
-      groupedMap[item.category].push(item);
-    }
-  }
-  state.globalSearch.groupedResults = Object.entries(groupedMap).map(([category, rows]) => ({
-    category,
-    total: scored.filter((row) => row.category === category).length,
-    hasMore: scored.filter((row) => row.category === category).length > rows.length,
-    results: rows,
-  }));
   state.globalSearch.selectedIndex = 0;
   renderGlobalSearchOverlay();
 }
@@ -3611,7 +4313,7 @@ function bindGlobalEvents() {
       }
       const nextView =
         state.sectionLastView[section] ||
-        (section === "aws" ? "workspaces" : NAV_STRUCTURE[section]?.items?.find((i) => i.view)?.view) ||
+        (section === "aws" ? "all-workspaces" : NAV_STRUCTURE[section]?.items?.find((i) => i.view)?.view) ||
         "dashboard";
       state.view = nextView;
       await refreshData();
@@ -3788,7 +4490,7 @@ function bindViewEvents() {
     };
   });
 
-  if (state.view === "workspaces") {
+  if (state.view === "workspaces" || state.view === "all-workspaces") {
     const addBtn = el("add-workspace-btn");
     const addBtnEmpty = el("add-workspace-btn-empty");
     if (addBtn) addBtn.onclick = () => openWorkspaceModal();
@@ -3815,7 +4517,7 @@ function bindViewEvents() {
           if (!confirm("Delete this workspace?")) return;
           await window.OggoAPI.deleteWorkspace(deleteId);
           await refreshData();
-          state.view = "workspaces";
+          state.view = "all-workspaces";
           toast("Workspace deleted", "success");
           render();
           bindViewEvents();
@@ -3842,7 +4544,7 @@ function bindViewEvents() {
           await window.OggoAPI.deleteWorkspace(deleteId);
           await refreshData();
           state.workspaceDetail = null;
-          state.view = "workspaces";
+          state.view = "all-workspaces";
           toast("Workspace deleted", "success");
           render();
           bindViewEvents();
@@ -4058,17 +4760,9 @@ function bindViewEvents() {
     const scanBtn = el("software-scan-btn");
     const historyBtn = el("software-history-btn");
     const searchInput = el("software-package-search");
-    const filterInput = el("software-package-filter");
     if (searchInput) {
       searchInput.oninput = () => {
         state.packageSearch = searchInput.value;
-        render();
-        bindViewEvents();
-      };
-    }
-    if (filterInput) {
-      filterInput.onchange = () => {
-        state.packageFilter = filterInput.value;
         render();
         bindViewEvents();
       };
@@ -4105,7 +4799,7 @@ function bindViewEvents() {
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
-                    <th class="py-2 px-2">Time</th><th class="py-2 px-2">Manager</th><th class="py-2 px-2">Package</th><th class="py-2 px-2">Action</th><th class="py-2 px-2">Status</th>
+                    <th class="py-2 px-2">Time</th><th class="py-2 px-2">Manager</th><th class="py-2 px-2">Package</th><th class="py-2 px-2">From</th><th class="py-2 px-2">To</th><th class="py-2 px-2">Action</th><th class="py-2 px-2">Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4117,12 +4811,14 @@ function bindViewEvents() {
                       <td class="py-2 px-2 text-xs">${new Date(row.created_at).toLocaleString()}</td>
                       <td class="py-2 px-2">${escapeHtml(row.package_manager)}</td>
                       <td class="py-2 px-2">${escapeHtml(row.package_name)}</td>
+                      <td class="py-2 px-2 text-xs">${escapeHtml(row.from_version || "-")}</td>
+                      <td class="py-2 px-2 text-xs">${escapeHtml(row.to_version || "-")}</td>
                       <td class="py-2 px-2">${escapeHtml(row.action)}</td>
                       <td class="py-2 px-2 ${row.status === "success" ? "text-green-500" : "text-red-500"}">${escapeHtml(row.status)}</td>
                     </tr>
                   `
                       )
-                      .join("") || `<tr><td class="py-4 px-2 text-gray-500" colspan="5">No history found.</td></tr>`
+                      .join("") || `<tr><td class="py-4 px-2 text-gray-500" colspan="7">No history found.</td></tr>`
                   }
                 </tbody>
               </table>
@@ -4137,6 +4833,28 @@ function bindViewEvents() {
       };
     }
     el("app-content").onclick = async (event) => {
+      const retryId = event.target.closest("[data-package-retry]")?.dataset?.packageRetry;
+      if (retryId) {
+        const op = state.packageOps.find((item) => item.id === retryId);
+        if (op) {
+          try {
+            await runPackageOperationWithProgress(op.manager, op.packageName, op.operation, op.payload || {});
+            await scanSoftware();
+            render();
+            bindViewEvents();
+          } catch (error) {
+            toast(error.message, "error");
+          }
+        }
+        return;
+      }
+      const pill = event.target.closest("[data-package-filter-pill]")?.dataset?.packageFilterPill;
+      if (pill) {
+        state.packageFilter = pill;
+        render();
+        bindViewEvents();
+        return;
+      }
       const managerScan = event.target.closest("[data-scan-manager]")?.dataset?.scanManager;
       if (managerScan) {
         try {
@@ -4155,21 +4873,49 @@ function bindViewEvents() {
       const packageName = actionNode.dataset.name;
       const fromVersion = actionNode.dataset.from || "";
       const toVersion = actionNode.dataset.to || "";
+      const installedVersion = actionNode.dataset.version || "";
+      const updateType = actionNode.dataset.type || "UNKNOWN";
       try {
-        if (action === "update" || action === "uninstall") {
-          const confirmText =
-            action === "update"
-              ? `Update ${packageName} (${fromVersion || "?"} -> ${toVersion || "latest"})?`
-              : `Uninstall ${packageName}?`;
-          if (!confirm(confirmText)) return;
-          const result = await window.OggoAPI.packageOperation(state.softwareServerId, {
-            manager,
-            packageName,
-            action,
-            fromVersion,
-            toVersion,
-            triggeredBy: "ui",
-          });
+        if (action === "bulk-update") {
+          const section = state.packageScan?.sections?.find((row) => row.manager === manager);
+          const candidates = getFilteredPackages(section?.packages || []).filter((pkg) => pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion);
+          if (!candidates.length) {
+            toast("No updatable packages in current filter", "info");
+            return;
+          }
+          const preview = candidates
+            .slice(0, 30)
+            .map((pkg) => `${pkg.name}: ${pkg.installedVersion || "?"} -> ${pkg.latestVersion || "latest"} [${pkg.updateType || "UNKNOWN"}]`)
+            .join("\n");
+          if (!confirm(`Bulk update ${candidates.length} packages?\n\n${preview}${candidates.length > 30 ? "\n..." : ""}`)) return;
+          let ok = 0;
+          for (const pkg of candidates) {
+            const result = await runPackageOperationWithProgress(manager, pkg.name, "update", {
+              fromVersion: pkg.installedVersion || "",
+              toVersion: pkg.latestVersion || "",
+            });
+            if (result.status === "success") ok += 1;
+          }
+          toast(`Bulk update finished: ${ok}/${candidates.length} succeeded`, ok === candidates.length ? "success" : "error");
+          await scanSoftware();
+          render();
+          bindViewEvents();
+          return;
+        }
+        if (action === "update") {
+          const confirmed = await confirmPackageUpdate(manager, packageName, fromVersion, toVersion, updateType);
+          if (!confirmed) return;
+          const result = await runPackageOperationWithProgress(manager, packageName, "update", { fromVersion, toVersion });
+          state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
+          toast(result.status === "success" ? "Operation succeeded" : "Operation failed", result.status === "success" ? "success" : "error");
+          await scanSoftware();
+          render();
+          bindViewEvents();
+          return;
+        }
+        if (action === "uninstall") {
+          if (!confirm(`Uninstall ${packageName}?`)) return;
+          const result = await runPackageOperationWithProgress(manager, packageName, "uninstall", { fromVersion, toVersion });
           state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
           toast(result.status === "success" ? "Operation succeeded" : "Operation failed", result.status === "success" ? "success" : "error");
           await scanSoftware();
@@ -4193,6 +4939,10 @@ function bindViewEvents() {
           bindViewEvents();
           return;
         }
+        if (action === "versions") {
+          await openPackageVersionsModal(manager, packageName, installedVersion);
+          return;
+        }
         if (action === "vulns") {
           const data = await window.OggoAPI.packageVulnerabilities(state.softwareServerId, {
             manager,
@@ -4212,7 +4962,9 @@ function bindViewEvents() {
                 (vulns || [])
                   .map((v) => `<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3">
                     <div class="font-semibold text-sm">${escapeHtml(v.id || "Unknown CVE")}</div>
+                    <div class="text-[11px] text-orange-500 mt-1">Severity: ${escapeHtml(v.severity?.[0]?.type || "unknown")} ${escapeHtml(v.severity?.[0]?.score || "")}</div>
                     <div class="text-xs text-gray-500 mt-1">${escapeHtml(v.summary || v.details || "")}</div>
+                    <div class="text-[11px] text-green-500 mt-1">Fix version: ${escapeHtml(v.affected?.[0]?.ranges?.[0]?.events?.find((e) => e.fixed)?.fixed || "n/a")}</div>
                   </div>`)
                   .join("") || '<div class="text-sm text-gray-500">No vulnerabilities returned by OSV.</div>'
               }
@@ -4923,9 +5675,20 @@ function bindViewEvents() {
   }
 
   if (state.view === "terminal") {
-    if (state.activeTerminalServerId) {
+    if (!state.activeTerminalServerId && state.servers.length) {
+      state.activeTerminalServerId = state.servers[0].id;
+    }
+    if (
+      state.activeTerminalServerId &&
+      (!terminalSocket ||
+        terminalSocketServerId !== state.activeTerminalServerId ||
+        terminalSocket.readyState === WebSocket.CLOSING ||
+        terminalSocket.readyState === WebSocket.CLOSED)
+    ) {
       connectTerminal(state.activeTerminalServerId);
     }
+    renderGuiContent();
+    loadSavedCommands("global").catch(() => {});
     const list = el("terminal-server-list");
     if (list) {
       list.onclick = (event) => {
@@ -4937,6 +5700,363 @@ function bindViewEvents() {
         bindViewEvents();
       };
     }
+    document.querySelectorAll("[data-gui-tab]").forEach((button) => {
+      button.onclick = async () => {
+        state.terminalGui.activeTab = button.dataset.guiTab || "files";
+        await loadActiveTerminalGuiTab(true);
+      };
+    });
+    const guiRefresh = el("terminal-gui-refresh");
+    if (guiRefresh) guiRefresh.onclick = () => loadActiveTerminalGuiTab(true);
+    const guiRetry = el("gui-connect-retry");
+    if (guiRetry) {
+      guiRetry.onclick = () => {
+        if (!state.activeTerminalServerId && state.servers.length) {
+          state.activeTerminalServerId = state.servers[0].id;
+        }
+        if (state.activeTerminalServerId) {
+          connectTerminal(state.activeTerminalServerId);
+        }
+      };
+    }
+
+    const guiPanel = el("terminal-gui-panel");
+    const resizer = el("terminal-panel-resizer");
+    if (guiPanel && resizer) {
+      const serverKey = state.activeTerminalServerId || "default";
+      resizer.onmousedown = (event) => {
+        event.preventDefault();
+        const rootRect = guiPanel.parentElement.getBoundingClientRect();
+        const moveHandler = (moveEvent) => {
+          const pct = ((moveEvent.clientX - rootRect.left) / rootRect.width) * 100;
+          const next = Math.max(20, Math.min(65, pct));
+          guiPanel.style.width = `${next}%`;
+          guiPanel.style.flex = "0 0 auto";
+          state.terminalGui.splitByServer[serverKey] = next;
+          localStorage.setItem(`oggo.terminal.split.${serverKey}`, String(next));
+          if (terminalFitAddon) terminalFitAddon.fit();
+        };
+        const upHandler = () => {
+          window.removeEventListener("mousemove", moveHandler);
+          window.removeEventListener("mouseup", upHandler);
+        };
+        window.addEventListener("mousemove", moveHandler);
+        window.addEventListener("mouseup", upHandler);
+      };
+    }
+
+    const guiRoot = el("terminal-gui-content");
+    if (guiRoot) {
+      guiRoot.oncontextmenu = (event) => {
+        const row = event.target.closest("[data-gui-file-open]");
+        if (!row) return;
+        event.preventDefault();
+        const cm = el("gui-context-menu");
+        if (!cm) return;
+        cm.dataset.fileName = row.dataset.guiFileOpen;
+        cm.dataset.fileType = row.dataset.guiFileType;
+        cm.style.left = `${event.clientX}px`;
+        cm.style.top = `${event.clientY}px`;
+        cm.classList.remove("hidden");
+      };
+      
+      const cm = el("gui-context-menu");
+      if (cm && !cm.dataset.bound) {
+        cm.dataset.bound = "true";
+        document.addEventListener("click", (e) => {
+          if (!cm.contains(e.target)) cm.classList.add("hidden");
+        });
+        cm.onclick = async (e) => {
+          const actionBtn = e.target.closest("[data-ctx-action]");
+          if (!actionBtn) return;
+          const action = actionBtn.dataset.ctxAction;
+          const fileName = cm.dataset.fileName;
+          const fileType = cm.dataset.fileType;
+          cm.classList.add("hidden");
+          
+          if (!fileName) return;
+          
+          const current = String(state.terminalGui.path || "~");
+          const base = current.endsWith("/") ? current.slice(0, -1) : current;
+          const filePath = base === "/" ? `/${fileName}` : `${base || "~"}/${fileName}`;
+          
+          try {
+            const runCmd = async (cmd, allowSudo = true) => {
+              const res = await window.OggoAPI.guiRunCommand({ command: cmd, sessionId: terminalSessionId });
+              if (res && res.exitCode === 0) return res;
+              const errText = String(res?.errorOutput || res?.output || "").toLowerCase();
+              if (!allowSudo || (!errText.includes("permission denied") && !errText.includes("not permitted") && !errText.includes("password"))) {
+                throw new Error(res?.errorOutput || res?.output || "Command failed");
+              }
+              const auth = await promptSudoAuth();
+              if (!auth) throw new Error(res?.errorOutput || res?.output || "Permission denied");
+              const sudoUser = String(auth.sudoUser || "").trim();
+              const sudoUserArg = sudoUser ? `-u ${sudoUser}` : "";
+              const sudoRes = await window.OggoAPI.guiRunCommand({
+                command: `sudo -S ${sudoUserArg} ${cmd}`,
+                sessionId: terminalSessionId,
+                stdin: `${auth.sudoPassword}\n`,
+                timeoutMs: 30000,
+              });
+              if (sudoRes && sudoRes.exitCode !== 0) throw new Error(sudoRes.errorOutput || sudoRes.output || "sudo failed");
+              return sudoRes;
+            };
+            if (action === "open") {
+              const row = document.querySelector(`[data-gui-file-open="${fileName.replace(/"/g, '\\"')}"]`);
+              if (row) row.click();
+            } else if (action === "delete") {
+              if (!confirm(`Delete ${fileType} "${fileName}"?`)) return;
+              const cmd = fileType === "directory" ? `rm -rf "${filePath}"` : `rm "${filePath}"`;
+              await runCmd(cmd, true);
+              toast("Deleted successfully", "success");
+              await loadActiveTerminalGuiTab(true);
+            } else if (action === "rename") {
+              const newName = prompt(`Rename ${fileName} to:`, fileName);
+              if (!newName || newName === fileName) return;
+              const newPath = base === "/" ? `/${newName}` : `${base || "~"}/${newName}`;
+              await runCmd(`mv "${filePath}" "${newPath}"`, true);
+              toast("Renamed successfully", "success");
+              await loadActiveTerminalGuiTab(true);
+            } else if (action === "chmod") {
+              const newPerms = prompt(`Change permissions for ${fileName} (e.g. 755 or 644):`, "755");
+              if (!newPerms) return;
+              await runCmd(`chmod ${newPerms} "${filePath}"`, true);
+              toast("Permissions updated", "success");
+              await loadActiveTerminalGuiTab(true);
+            }
+          } catch (error) {
+            toast(error.message, "error");
+          }
+        };
+      }
+
+      guiRoot.onclick = async (event) => {
+        try {
+          const runCmd = async (cmd) => {
+            const res = await window.OggoAPI.guiRunCommand({ command: cmd, sessionId: terminalSessionId });
+            if (res && res.exitCode === 0) return res;
+            const errText = String(res?.errorOutput || res?.output || "").toLowerCase();
+            if (!errText.includes("permission denied") && !errText.includes("not permitted") && !errText.includes("password")) {
+              throw new Error(res?.errorOutput || res?.output || "Command failed");
+            }
+            const auth = await promptSudoAuth();
+            if (!auth) throw new Error(res?.errorOutput || res?.output || "Permission denied");
+            const sudoUser = String(auth.sudoUser || "").trim();
+            const sudoUserArg = sudoUser ? `-u ${sudoUser}` : "";
+            const sudoRes = await window.OggoAPI.guiRunCommand({
+              command: `sudo -S ${sudoUserArg} ${cmd}`,
+              sessionId: terminalSessionId,
+              stdin: `${auth.sudoPassword}\n`,
+              timeoutMs: 30000,
+            });
+            if (sudoRes && sudoRes.exitCode !== 0) throw new Error(sudoRes.errorOutput || sudoRes.output || "sudo failed");
+            return sudoRes;
+          };
+          if (event.target.closest("#gui-files-new-file")) {
+            const name = prompt("New file name:");
+            if (!name) return;
+            const current = String(state.terminalGui.path || "~");
+            const base = current.endsWith("/") ? current.slice(0, -1) : current;
+            const filePath = base === "/" ? `/${name}` : `${base || "~"}/${name}`;
+            await runCmd(`touch "${filePath}"`);
+            toast("File created", "success");
+            await loadActiveTerminalGuiTab(true);
+          }
+          if (event.target.closest("#gui-files-new-dir")) {
+            const name = prompt("New folder name:");
+            if (!name) return;
+            const current = String(state.terminalGui.path || "~");
+            const base = current.endsWith("/") ? current.slice(0, -1) : current;
+            const dirPath = base === "/" ? `/${name}` : `${base || "~"}/${name}`;
+            await runCmd(`mkdir -p "${dirPath}"`);
+            toast("Folder created", "success");
+            await loadActiveTerminalGuiTab(true);
+          }
+          if (event.target.closest("#gui-files-open")) {
+            state.terminalGui.path = String(el("gui-files-path")?.value || "~").trim() || "~";
+            state.terminalGui.showHidden = Boolean(el("gui-files-hidden")?.checked);
+            state.terminalGui.editor = null;
+            await loadActiveTerminalGuiTab(true);
+          }
+          if (event.target.closest("#gui-files-up")) {
+            const current = String(state.terminalGui.path || "~");
+            const normalized = current === "~" ? "/" : current;
+            const parent = normalized === "/" ? "/" : normalized.split("/").slice(0, -1).join("/") || "/";
+            state.terminalGui.path = parent;
+            state.terminalGui.editor = null;
+            await loadActiveTerminalGuiTab(true);
+          }
+          const openName = event.target.closest("[data-gui-file-open]")?.dataset?.guiFileOpen;
+          const openType = event.target.closest("[data-gui-file-open]")?.dataset?.guiFileType;
+          if (openName) {
+            if (openType === "directory") {
+              const current = String(state.terminalGui.path || "~");
+              const base = current.endsWith("/") ? current.slice(0, -1) : current;
+              state.terminalGui.path =
+                base === "/" ? `/${openName}` : `${base || "~"}/${openName}`;
+              state.terminalGui.editor = null;
+              await loadActiveTerminalGuiTab(true);
+            } else {
+              const current = String(state.terminalGui.path || "~");
+              const base = current.endsWith("/") ? current.slice(0, -1) : current;
+              const filePath = base === "/" ? `/${openName}` : `${base || "~"}/${openName}`;
+              const result = await window.OggoAPI.guiFsRead({
+                sessionId: terminalSessionId,
+                serverId: state.activeTerminalServerId,
+                path: filePath,
+              });
+              if (result.tooLarge) {
+                toast("File is too large for browser editor (>10MB).", "warning");
+                return;
+              }
+              if (result.isBinary) {
+                toast("Binary file detected; editor is text-only.", "warning");
+                return;
+              }
+              if (result.warnLarge) {
+                toast("Large file warning (>2MB). Editing may be slower.", "info");
+              }
+              state.terminalGui.editor = { path: result.path, content: result.content || "" };
+              renderGuiContent();
+            }
+          }
+          if (event.target.closest("#gui-editor-back")) {
+            state.terminalGui.editor = null;
+            renderGuiContent();
+          }
+          if (event.target.closest("#gui-editor-save")) {
+            const editorContent = guiMonacoEditor ? guiMonacoEditor.getValue() : state.terminalGui.editor?.content || "";
+            const path = String(state.terminalGui.editor?.path || "");
+            if (!path) {
+              toast("No editor file path selected", "warning");
+            } else {
+              try {
+                await window.OggoAPI.guiFsWrite({
+                  sessionId: terminalSessionId,
+                  serverId: state.activeTerminalServerId,
+                  path,
+                  content: editorContent,
+                });
+                toast("File saved", "success");
+              } catch (error) {
+                if (!isPermissionDeniedError(error)) throw error;
+                const auth = await promptSudoAuth();
+                if (!auth) throw error;
+                await window.OggoAPI.guiFsWrite({
+                  sessionId: terminalSessionId,
+                  serverId: state.activeTerminalServerId,
+                  path,
+                  content: editorContent,
+                  sudoUser: auth.sudoUser,
+                  sudoPassword: auth.sudoPassword,
+                });
+                toast("File saved (sudo)", "success");
+              }
+            }
+          }
+          if (event.target.closest("#gui-proc-refresh")) await loadActiveTerminalGuiTab(true);
+          if (event.target.closest("#gui-proc-kill")) {
+            await window.OggoAPI.guiKillProcess({
+              sessionId: terminalSessionId,
+              pid: Number(el("gui-proc-kill-pid")?.value || 0),
+              signal: Number(el("gui-proc-signal")?.value || 15),
+            });
+            await loadActiveTerminalGuiTab(true);
+          }
+          if (event.target.closest("#gui-svc-refresh")) await loadActiveTerminalGuiTab(true);
+          if (event.target.closest("#gui-svc-run")) {
+            await window.OggoAPI.guiServiceAction({
+              sessionId: terminalSessionId,
+              service: String(el("gui-svc-name")?.value || "").trim(),
+              action: String(el("gui-svc-action")?.value || "restart"),
+            });
+            await loadActiveTerminalGuiTab(true);
+          }
+          if (event.target.closest("#gui-logs-sources")) {
+            const result = await window.OggoAPI.guiLogSources({ sessionId: terminalSessionId });
+            state.terminalGui.logs.sources = result.paths || [];
+            renderGuiContent();
+          }
+          if (event.target.closest("#gui-logs-open")) {
+            const path = String(el("gui-logs-path")?.value || "").trim();
+            if (path) {
+              state.terminalGui.logs.selected = path;
+              const output = await window.OggoAPI.guiReadLog({ sessionId: terminalSessionId, path, lines: 100 });
+              state.terminalGui.logs.content = output.output || "";
+              renderGuiContent();
+            }
+          }
+          if (event.target.closest("#gui-disk-refresh")) {
+            state.terminalGui.disk = await window.OggoAPI.guiDisk({
+              sessionId: terminalSessionId,
+              path: String(el("gui-disk-path")?.value || "/"),
+            });
+            renderGuiContent();
+          }
+          if (event.target.closest("#gui-disk-large")) {
+            const result = await window.OggoAPI.guiFindLargeFiles({ sessionId: terminalSessionId });
+            toast(`Large files loaded (${(result.output || "").split(/\n/).filter(Boolean).length})`, "success");
+          }
+          if (event.target.closest("#gui-net-refresh")) {
+            state.terminalGui.network = await window.OggoAPI.guiNetwork({ sessionId: terminalSessionId });
+            renderGuiContent();
+          }
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      };
+    }
+
+    const savedPanel = el("saved-commands-panel");
+    if (savedPanel) {
+      let savedScope = "global";
+      savedPanel.onclick = async (event) => {
+        const scope = event.target.closest("[data-saved-scope]")?.dataset?.savedScope;
+        const runId = event.target.closest("[data-saved-run]")?.dataset?.savedRun;
+        const deleteId = event.target.closest("[data-saved-delete]")?.dataset?.savedDelete;
+        if (scope) {
+          savedScope = scope;
+          await loadSavedCommands(savedScope);
+          return;
+        }
+        if (runId) {
+          const data = await window.OggoAPI.listSavedCommands(
+            savedScope,
+            savedScope === "server" ? state.activeTerminalServerId : ""
+          );
+          const item = (data.commands || []).find((row) => row.id === runId);
+          if (item && terminalSocket?.readyState === WebSocket.OPEN) {
+            const cmd = `${item.command}\r`;
+            terminalSocket.send(JSON.stringify({ type: "data", data: cmd }));
+            await window.OggoAPI.markSavedCommandUsed(runId);
+          }
+          return;
+        }
+        if (deleteId) {
+          await window.OggoAPI.deleteSavedCommand(deleteId);
+          await loadSavedCommands(savedScope);
+          return;
+        }
+      };
+    }
+    const savedAdd = el("saved-command-add");
+    if (savedAdd) {
+      savedAdd.onclick = async () => {
+        const name = prompt("Saved command name");
+        if (!name) return;
+        const command = prompt("Command");
+        if (!command) return;
+        const useServerScope = confirm("Save only for this server? Click Cancel for global.");
+        await window.OggoAPI.createSavedCommand({
+          name,
+          command,
+          scope: useServerScope ? "server" : "global",
+          serverId: useServerScope ? state.activeTerminalServerId : null,
+        });
+        await loadSavedCommands(useServerScope ? "server" : "global");
+      };
+    }
+
     const clearBtn = el("terminal-clear-btn");
     if (clearBtn) clearBtn.onclick = () => terminalInstance?.clear();
     const explainBtn = el("terminal-explain-btn");
@@ -4946,6 +6066,7 @@ function bindViewEvents() {
       disconnectBtn.onclick = () => {
         if (terminalSocket) terminalSocket.close();
         terminalSocket = null;
+        terminalSessionId = null;
         if (terminalInstance) terminalInstance.writeln("\r\nDisconnected.\r\n");
       };
     }
@@ -4968,6 +6089,7 @@ function bindViewEvents() {
         state.settings = await window.OggoAPI.saveSettings(next);
         localStorage.setItem("oggo-password", state.settings.password || "");
         window.OggoTheme.apply(state.settings.theme || "dark");
+        configureSoftwareAutoScan();
         toast("Settings saved", "success");
       } catch (error) {
         toast(error.message, "error");
@@ -4988,6 +6110,7 @@ function bindViewEvents() {
     };
     el("danger-reset").onclick = async () => {
       state.settings = await window.OggoAPI.resetSettings();
+      configureSoftwareAutoScan();
       toast("Settings reset to defaults", "success");
       render();
       bindViewEvents();
@@ -5001,6 +6124,7 @@ async function bootstrap() {
     window.toast = toast;
     await refreshData();
     window.OggoTheme.apply(state.settings.theme || window.OggoTheme.current || "dark");
+    configureSoftwareAutoScan();
     state.view = "dashboard";
     render();
     bindGlobalEvents();

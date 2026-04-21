@@ -5,12 +5,10 @@ const fs = require("fs-extra");
 const express = require("express");
 const cors = require("cors");
 const WebSocket = require("ws");
-const { Client } = require("ssh2");
 const { loadConfig, ensureFirstRunPaths, getConfigFilePath } = require("./config/configLoader");
-const { initializeDatabase, get, run } = require("./db/database");
+const { initializeDatabase, get } = require("./db/database");
 const { appLogger } = require("./services/logService");
 const { reloadAllJobs, getScheduledCount } = require("./services/cronService");
-const { buildConnectConfig } = require("./services/sshService");
 const { getDbPath, getRuntimePath } = require("./services/platformService");
 const { apiAuthMiddleware } = require("./middleware/auth");
 const jobsRouter = require("./routes/jobs");
@@ -20,6 +18,7 @@ const settingsRouter = require("./routes/settings");
 const serversRouter = require("./routes/servers");
 const keysRouter = require("./routes/keys");
 const terminalRouter = require("./routes/terminal");
+const terminalGuiRouter = require("./routes/terminal-gui");
 const s3Router = require("./routes/s3");
 const awsRouter = require("./routes/aws");
 const workspacesRouter = require("./routes/workspaces");
@@ -27,13 +26,15 @@ const searchRouter = require("./routes/search");
 const devToolsRouter = require("./routes/devtools");
 const { errorHandler } = require("./middleware/error-handler");
 const softwareRouter = require("./routes/software");
-const {
-  ensureBuiltinSnippets,
-  recordTerminalHistory,
-  detectError,
-} = require("./services/commandIntelService");
+const savedCommandsRouter = require("./routes/saved-commands");
+const { ensureBuiltinSnippets } = require("./services/commandIntelService");
 const { initializeTldrIndex, shouldUpdate } = require("./services/tldrService");
 const { buildSearchIndex } = require("./services/searchService");
+const {
+  createSession,
+  attachClient,
+  detachClient,
+} = require("./services/terminalSessionManager");
 
 const app = express();
 
@@ -106,6 +107,8 @@ async function init() {
   app.use("/api/servers", serversRouter);
   app.use("/api/keys", keysRouter);
   app.use("/api/terminal", terminalRouter);
+  app.use("/api/terminal-gui", terminalGuiRouter);
+  app.use("/api/saved-commands", savedCommandsRouter);
   app.use("/api/s3", s3Router);
   app.use("/api/aws", awsRouter);
   app.use("/api/workspaces", workspacesRouter);
@@ -166,112 +169,38 @@ async function init() {
       return;
     }
 
-    const sessionId = require("uuid").v4();
-    const startedAt = new Date().toISOString();
-    await run("INSERT INTO ssh_sessions (id, server_id, started_at, ended_at, duration) VALUES (?, ?, ?, NULL, NULL)", [
-      sessionId,
-      serverId,
-      startedAt,
-    ]);
-
-    const conn = new Client();
-    let streamRef = null;
-    let closed = false;
-
-    conn.on("ready", () => {
-      run("UPDATE servers SET last_connected = ?, last_status = ? WHERE id = ?", [
-        new Date().toISOString(),
-        "online",
-        serverId,
-      ]).catch(() => {});
-      ws.send(JSON.stringify({ type: "status", status: "connected" }));
-      conn.shell({ term: "xterm-256color" }, (err, stream) => {
-        if (err) {
-          ws.send(JSON.stringify({ type: "error", message: err.message }));
-          ws.close();
-          conn.end();
-          return;
-        }
-        streamRef = stream;
-        let lineBuffer = "";
-        stream.on("data", (data) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            const text = data.toString();
-            ws.send(JSON.stringify({ type: "data", data: Buffer.from(data).toString("base64") }));
-            const detected = detectError(text);
-            if (detected) {
-              ws.send(JSON.stringify({ type: "error_card", data: detected }));
-            }
-            lineBuffer += text;
-            if (lineBuffer.includes("\n")) {
-              const pieces = lineBuffer.split("\n");
-              lineBuffer = pieces.pop() || "";
-              const latest = pieces.map((p) => p.trim()).filter(Boolean).pop();
-              if (latest) {
-                recordTerminalHistory(serverId, latest, text, detected ? "failed" : "success").catch(() => {});
-              }
-            }
-          }
-        });
-        stream.stderr.on("data", (data) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "data", data: Buffer.from(data).toString("base64") }));
-          }
-        });
-        stream.on("close", () => {
-          if (ws.readyState === WebSocket.OPEN) ws.close();
-        });
-      });
-    });
-
-    conn.on("error", (error) => {
-      run("UPDATE servers SET last_status = ? WHERE id = ?", ["offline", serverId]).catch(() => {});
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "error", message: error.message }));
-        ws.close();
-      }
-    });
+    let session = null;
+    try {
+      session = await createSession(serverId, serverRow);
+      attachClient(session, ws);
+      ws.send(JSON.stringify({ type: "status", status: "connected", sessionId: session.id }));
+    } catch (error) {
+      ws.send(JSON.stringify({ type: "error", message: error.message }));
+      ws.close();
+      return;
+    }
 
     ws.on("message", (msg) => {
       try {
         const parsed = JSON.parse(msg.toString());
-        if (!streamRef) return;
+        if (!session || !session.stream) return;
         if (parsed.type === "data") {
-          streamRef.write(parsed.data);
+          session.stream.write(parsed.data);
         }
-        if (parsed.type === "resize") streamRef.setWindow(parsed.rows, parsed.cols, 0, 0);
+        if (parsed.type === "resize") session.stream.setWindow(parsed.rows, parsed.cols, 0, 0);
       } catch (_error) {
         // ignore malformed messages
       }
     });
 
-    const cleanup = () => {
-      if (closed) return;
-      closed = true;
-      const endedAt = Date.now();
-      const duration = endedAt - new Date(startedAt).getTime();
-      run("UPDATE ssh_sessions SET ended_at = ?, duration = ? WHERE id = ?", [
-        new Date(endedAt).toISOString(),
-        duration,
-        sessionId,
-      ]).catch(() => {});
-      if (streamRef) {
-        try {
-          streamRef.end();
-        } catch (_error) {}
-      }
-      conn.end();
+    const cleanup = async () => {
+      if (!session) return;
+      await detachClient(session.id, ws);
+      session = null;
     };
 
-    ws.on("close", cleanup);
-    ws.on("error", cleanup);
-
-    try {
-      conn.connect(buildConnectConfig(serverRow));
-    } catch (error) {
-      ws.send(JSON.stringify({ type: "error", message: error.message }));
-      ws.close();
-    }
+    ws.on("close", () => cleanup().catch(() => {}));
+    ws.on("error", () => cleanup().catch(() => {}));
   });
 
   const server = httpServer.listen(port, bindHost, () => {

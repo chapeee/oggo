@@ -173,45 +173,63 @@ async function startOggo() {
   }
 
   const config = loadConfig();
-  const port = Number(process.env.PORT || config.port || 3030);
-  const url = `http://localhost:${port}`;
   const runtime = getRuntimeInfo();
   if (runtime?.pid && isPidAlive(runtime.pid)) {
-    console.log(`Oggo is already running at ${url} (pid ${runtime.pid})`);
-    openBrowser(url);
+    const liveUrl = runtime.url || `http://localhost:${runtime.port || 3030}`;
+    console.log(`Oggo is already running at ${liveUrl} (pid ${runtime.pid})`);
+    openBrowser(liveUrl);
     process.exit(0);
   }
 
   console.log("Starting Oggo...");
-  const child = spawn(process.execPath, [path.join(__dirname, "../src/server.js")], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-    env: process.env,
-  });
-  child.unref();
+  const basePort = Number(process.env.PORT || config.port || 3030);
+  const portsToTry = [basePort, basePort + 1, basePort + 2, basePort + 3, basePort + 4];
 
-  writeRuntimeInfo({
-    pid: child.pid,
-    port,
-    url,
-    startedAt: new Date().toISOString(),
-  });
+  for (const port of portsToTry) {
+    const url = `http://localhost:${port}`;
 
-  try {
-    await waitForServer(port, 15000);
-    console.log(`✓ Oggo is running at ${url}`);
-    openBrowser(url);
-    process.exit(0);
-  } catch (error) {
-    if (isPidAlive(child.pid)) {
-      try {
-        process.kill(child.pid);
-      } catch (_killError) {}
+    let childExitCode = null;
+    let childCrashed = false;
+
+    const child = spawn(process.execPath, [path.join(__dirname, "../src/server.js")], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, PORT: String(port) },
+    });
+    child.unref();
+
+    writeRuntimeInfo({ pid: child.pid, port, url, startedAt: new Date().toISOString() });
+
+    const crashMonitor = setTimeout(() => {
+      if (childExitCode !== null && childExitCode !== 0) {
+        childCrashed = true;
+      }
+    }, 2000);
+
+    child.on("exit", (code) => {
+      childExitCode = code;
+      clearTimeout(crashMonitor);
+    });
+
+    try {
+      await waitForServer(port, 10000);
+      console.log(`✓ Oggo is running at ${url}`);
+      openBrowser(url);
+      process.exit(0);
+    } catch (_error) {
+      if (childCrashed || (childExitCode !== null && childExitCode !== 0)) {
+        console.log(`✗ Oggo process crashed on port ${port} (exit code: ${childExitCode || "unknown"}). Trying next port...`);
+      }
+      if (isPidAlive(child.pid)) {
+        try {
+          process.kill(child.pid);
+        } catch (_killError) {}
+      }
+      removeRuntimeInfo();
     }
-    removeRuntimeInfo();
-    throw error;
   }
+  throw new Error(`Server did not become ready on ports ${portsToTry.join(", ")}`);
 }
 
 async function stopOggo() {
@@ -259,11 +277,18 @@ async function statusOggo() {
 }
 
 async function openOggo() {
+  const runtime = getRuntimeInfo();
+  const url = runtime?.url || (runtime?.port ? `http://localhost:${runtime.port}` : null);
+  if (url) {
+    openBrowser(url);
+    console.log(`Opened ${url}`);
+    return;
+  }
   const config = loadConfig();
   const port = Number(process.env.PORT || config.port || 3030);
-  const url = `http://localhost:${port}`;
-  openBrowser(url);
-  console.log(`Opened ${url}`);
+  const fallback = `http://localhost:${port}`;
+  openBrowser(fallback);
+  console.log(`Opened ${fallback}`);
 }
 
 async function showConfig() {
