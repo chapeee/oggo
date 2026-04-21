@@ -127,6 +127,16 @@ async function getManagerVersion(target, manager) {
   return line ? line.trim() : "Unknown";
 }
 
+async function getManagerPath(target, manager) {
+  const cmd = target.targetType === "local" && process.platform === "win32" ? `where ${manager}` : `command -v ${manager}`;
+  const result = await runOnTarget(target, cmd, 10000);
+  const line = (result.output || "")
+    .split(/\r?\n/)
+    .map((v) => v.trim())
+    .find(Boolean);
+  return line || "";
+}
+
 async function scanNpm(target) {
   const [listRes, outdatedRes, auditRes] = await Promise.all([
     runOnTarget(target, "npm list -g --depth=0 --json", 90000),
@@ -419,7 +429,10 @@ async function scanPackages(serverId, managerFilter = null) {
 
   const sections = [];
   for (const manager of selectedManagers) {
-    const version = await getManagerVersion(target, manager);
+    const [version, managerPath] = await Promise.all([
+      getManagerVersion(target, manager),
+      getManagerPath(target, manager),
+    ]);
     const scanned = await scanByManager(target, manager);
     const packages = (scanned.packages || []).map((pkg) => {
       const key = `${manager}:${pkg.name}`;
@@ -435,6 +448,7 @@ async function scanPackages(serverId, managerFilter = null) {
       manager,
       managerLabel: MANAGER_DEFS[manager]?.label || manager,
       managerVersion: version,
+      managerPath,
       packageCount: packages.length,
       outdatedCount,
       vulnerableCount,
@@ -458,6 +472,85 @@ async function scanPackages(serverId, managerFilter = null) {
     },
     sections,
   };
+}
+
+async function streamScan(serverId, managerFilter = null, emit = () => {}) {
+  const target = await resolveTarget(serverId);
+  const managers = await detectManagers(target);
+  const selectedManagers = managerFilter ? managers.filter((m) => m === managerFilter) : managers;
+  const pinnedMap = await getPinnedMap(serverId);
+  const sections = [];
+
+  for (const manager of selectedManagers) {
+    emit("progress", { type: "start", manager, total: null });
+
+    const [version, managerPath] = await Promise.all([
+      getManagerVersion(target, manager),
+      getManagerPath(target, manager),
+    ]);
+    const scanned = await scanByManager(target, manager);
+    const packages = (scanned.packages || []).map((pkg) => {
+      const key = `${manager}:${pkg.name}`;
+      return { ...pkg, manager, pinned: Boolean(pinnedMap[key]) };
+    });
+
+    for (const pkg of packages) {
+      emit("progress", {
+        type: "package",
+        manager,
+        name: pkg.name,
+        installed: pkg.installedVersion || "",
+        latest: pkg.latestVersion || "",
+        updateType: String(pkg.updateType || "NONE").toLowerCase(),
+      });
+    }
+
+    const outdatedCount = packages.filter((p) => p.latestVersion && p.latestVersion !== p.installedVersion).length;
+    const vulnerableCount = packages.filter((p) => Number(p.vulnCount || 0) > 0).length;
+    const section = {
+      manager,
+      managerLabel: MANAGER_DEFS[manager]?.label || manager,
+      managerVersion: version,
+      managerPath,
+      packageCount: packages.length,
+      outdatedCount,
+      vulnerableCount,
+      packages,
+    };
+    sections.push(section);
+    emit("progress", {
+      type: "complete",
+      manager,
+      count: packages.length,
+      outdated: outdatedCount,
+      vulnerable: vulnerableCount,
+      section,
+    });
+  }
+
+  const allPackages = sections.flatMap((section) => section.packages);
+  const totalPackages = allPackages.length;
+  const totalOutdated = allPackages.filter((pkg) => pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion).length;
+  const totalVulnerable = allPackages.reduce((sum, pkg) => sum + Number(pkg.vulnCount || 0), 0);
+  const payload = {
+    serverId,
+    serverName: target.name || target.host || "Server",
+    scannedAt: new Date().toISOString(),
+    detectedManagers: selectedManagers,
+    stats: {
+      totalPackages,
+      updatesAvailable: totalOutdated,
+      vulnerabilities: totalVulnerable,
+    },
+    sections,
+  };
+  emit("done", {
+    totalPackages,
+    totalUpdates: totalOutdated,
+    totalVulns: totalVulnerable,
+    payload,
+  });
+  return payload;
 }
 
 function commandForOperation(action, manager, packageName, version, mode) {
@@ -613,10 +706,24 @@ async function removePin(serverId, manager, packageName) {
   ]);
 }
 
-async function listHistory(serverId, limit = 200) {
+async function listHistory(serverId, limit = 200, filter = "all", search = "") {
+  const normalizedFilter = String(filter || "all").trim().toLowerCase();
+  const clauses = ["server_id = ?"];
+  const params = [serverId];
+  if (normalizedFilter === "failed") {
+    clauses.push("status = 'failed'");
+  } else if (["update", "downgrade", "uninstall", "scan"].includes(normalizedFilter)) {
+    clauses.push("action = ?");
+    params.push(normalizedFilter);
+  }
+  if (String(search || "").trim()) {
+    clauses.push("package_name LIKE ?");
+    params.push(`%${String(search).trim()}%`);
+  }
+  params.push(Number(limit || 200));
   return all(
-    "SELECT * FROM package_history WHERE server_id = ? ORDER BY created_at DESC LIMIT ?",
-    [serverId, Number(limit || 200)]
+    `SELECT * FROM package_history WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ?`,
+    params
   );
 }
 
@@ -649,6 +756,63 @@ async function queryOsvVulnerabilities(manager, packageName, version) {
   return response.json();
 }
 
+function normalizeSeverityFromOsv(v) {
+  const scored = Array.isArray(v?.severity) ? v.severity[0] : null;
+  const score = Number(scored?.score || 0);
+  if (score >= 9) return "CRITICAL";
+  if (score >= 7) return "HIGH";
+  if (score >= 4) return "MEDIUM";
+  if (score > 0) return "LOW";
+  const level = String(v?.database_specific?.severity || "").toUpperCase();
+  if (["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(level)) return level;
+  return "UNKNOWN";
+}
+
+function firstTwoSentences(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const parts = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+  return parts.slice(0, 2).join(" ");
+}
+
+function extractAffectedAndFixed(vuln = {}) {
+  const affectedRanges = [];
+  let fixedVersion = "";
+  (vuln.affected || []).forEach((aff) => {
+    (aff.ranges || []).forEach((range) => {
+      const introduced = [];
+      const fixed = [];
+      (range.events || []).forEach((event) => {
+        if (event.introduced) introduced.push(event.introduced);
+        if (event.fixed) fixed.push(event.fixed);
+      });
+      if (introduced.length || fixed.length) {
+        affectedRanges.push(`${introduced[0] || "?"} -> ${fixed[0] || "unfixed"}`);
+      }
+      if (!fixedVersion && fixed[0]) fixedVersion = fixed[0];
+    });
+  });
+  return { affectedRanges, fixedVersion };
+}
+
+async function fetchCVEs(serverId, manager, packageName, version) {
+  await resolveTarget(serverId);
+  const osv = await queryOsvVulnerabilities(manager, packageName, version);
+  const vulnerabilities = Array.isArray(osv?.vulns) ? osv.vulns : Array.isArray(osv?.vulnerabilities) ? osv.vulnerabilities : [];
+  return vulnerabilities.map((v) => {
+    const { affectedRanges, fixedVersion } = extractAffectedAndFixed(v);
+    return {
+      id: v.id || "UNKNOWN",
+      severity: normalizeSeverityFromOsv(v),
+      cvss: Number(Array.isArray(v.severity) && v.severity[0]?.score ? v.severity[0].score : 0) || null,
+      description: firstTwoSentences(v.summary || v.details || ""),
+      affectedVersions: affectedRanges,
+      fixedVersion: fixedVersion || "",
+      referenceUrl: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v.id || "")}`,
+    };
+  });
+}
+
 /**
  * Returns recent published versions for a package manager.
  *
@@ -677,29 +841,39 @@ async function listPublishedVersions(serverId, manager, packageName, limit = 5) 
   }
 
   if (manager === "pip" || manager === "pip3") {
-    const result = await runOnTarget(target, `${manager} index versions ${packageName}`, 60000);
-    const line = (result.output || "").split(/\r?\n/).find((row) => row.toLowerCase().includes("available versions:")) || "";
-    const raw = line.split(":").slice(1).join(":");
-    const versions = raw
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean)
+    const response = await fetch(`https://pypi.org/pypi/${encodeURIComponent(packageName)}/json`);
+    if (!response.ok) throw new Error(`PyPI query failed: ${response.status}`);
+    const data = await response.json();
+    const releases = data?.releases || {};
+    return Object.entries(releases)
+      .map(([version, files]) => {
+        const firstFile = Array.isArray(files) ? files[0] : null;
+        const uploadTime = firstFile?.upload_time_iso_8601 || firstFile?.upload_time || "";
+        const size = (Array.isArray(files) ? files : []).reduce((sum, f) => sum + Number(f?.size || 0), 0);
+        return { version: String(version), publishedAt: String(uploadTime || ""), size };
+      })
+      .sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1))
       .slice(0, max);
-    return versions.map((version) => ({ version, publishedAt: "" }));
   }
 
   if (manager === "composer") {
-    const result = await runOnTarget(target, `composer show ${packageName} --all --format=json`, 60000);
-    const data = safeJson(result.output || "{}", {});
-    const versions = Array.isArray(data?.versions) ? data.versions : [];
-    return versions
-      .filter((v) => !String(v).toLowerCase().includes("dev"))
-      .slice(0, max)
-      .map((version) => ({ version: String(version), publishedAt: "" }));
+    const response = await fetch(`https://repo.packagist.org/p2/${encodeURIComponent(packageName)}.json`);
+    if (!response.ok) throw new Error(`Packagist query failed: ${response.status}`);
+    const data = await response.json();
+    const packages = Array.isArray(data?.packages?.[packageName]) ? data.packages[packageName] : [];
+    return packages
+      .filter((p) => !String(p.version || "").toLowerCase().includes("dev"))
+      .map((p) => ({
+        version: String(p.version || ""),
+        publishedAt: String(p.time || ""),
+        size: Number(p.dist?.shasum ? 0 : 0),
+      }))
+      .filter((p) => p.version)
+      .slice(0, max);
   }
 
   if (manager === "gem") {
-    const result = await runOnTarget(target, `gem list -ra ${packageName}`, 60000);
+    const result = await runOnTarget(target, `gem list --remote ${packageName} --all`, 60000);
     const line = (result.output || "")
       .split(/\r?\n/)
       .map((row) => row.trim())
@@ -712,7 +886,7 @@ async function listPublishedVersions(serverId, manager, packageName, limit = 5) 
       .map((v) => v.trim())
       .filter(Boolean)
       .slice(0, max);
-    return versions.map((version) => ({ version, publishedAt: "" }));
+    return versions.map((version) => ({ version, publishedAt: "", size: null }));
   }
 
   if (manager === "apt" || manager === "apt-get") {
@@ -728,15 +902,27 @@ async function listPublishedVersions(serverId, manager, packageName, limit = 5) 
   return [];
 }
 
+async function fetchVersions(serverId, manager, packageName, limit = 10) {
+  const rows = await listPublishedVersions(serverId, manager, packageName, limit);
+  return (rows || []).map((row) => ({
+    version: row.version,
+    date: row.publishedAt || row.date || "",
+    size: row.size ?? null,
+  }));
+}
+
 module.exports = {
   MANAGER_DEFS,
   resolveTarget,
   scanPackages,
+  streamScan,
   executePackageOperation,
   runCustomInstall,
   upsertPin,
   removePin,
   listHistory,
   queryOsvVulnerabilities,
+  fetchCVEs,
   listPublishedVersions,
+  fetchVersions,
 };

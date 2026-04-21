@@ -204,17 +204,10 @@
    * @returns {Promise<void>}
    */
   async function openAttachServiceModal(workspaceId, serviceType) {
-    const awsConnections = await window.OggoAPI.getAwsConnections();
-    const awsConnectionId = awsConnections[0]?.id || "";
-    const serviceIdentifier = prompt(`Enter ${serviceType} identifier`);
-    if (!serviceIdentifier) return;
-    await window.OggoAPI.attachServiceToWorkspace(workspaceId, {
-      awsConnectionId,
-      serviceType,
-      serviceIdentifier,
-      region: "us-east-1",
-      friendlyName: "",
-    });
+    const detail = await window.OggoAPI.getWorkspace(workspaceId);
+    if (typeof window.openWorkspaceServiceModal === "function") {
+      window.openWorkspaceServiceModal(serviceType, null, detail);
+    }
   }
 
   /**
@@ -225,7 +218,9 @@
    * @returns {Promise<boolean>}
    */
   async function deleteWorkspace(id, name) {
-    const ok = window.confirm(`Delete workspace "${name || id}"?`);
+    const ok = typeof window.uiConfirm === "function"
+      ? await window.uiConfirm(`Delete workspace "${name || id}"?`, { title: "Delete Workspace", okLabel: "Delete", danger: true })
+      : false;
     if (!ok) return false;
     await window.OggoAPI.deleteWorkspace(id);
     return true;

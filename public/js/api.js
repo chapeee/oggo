@@ -317,22 +317,34 @@ const API = {
   deleteWorkspace(id) {
     return this.request(`/api/workspaces/${id}`, { method: "DELETE" });
   },
-  attachS3ToWorkspace(workspaceId, data) {
-    return this.request(`/api/workspaces/${workspaceId}/s3`, { method: "POST", body: JSON.stringify(data) });
-  },
   attachServiceToWorkspace(workspaceId, data) {
     return this.request(`/api/workspaces/${workspaceId}/services`, { method: "POST", body: JSON.stringify(data) });
+  },
+  updateWorkspaceService(workspaceId, serviceId, data) {
+    return this.request(`/api/workspaces/${workspaceId}/services/${serviceId}`, { method: "PUT", body: JSON.stringify(data) });
   },
   detachServiceFromWorkspace(workspaceId, serviceId) {
     return this.request(`/api/workspaces/${workspaceId}/services/${serviceId}`, { method: "DELETE" });
   },
+  testWorkspaceService(workspaceId, serviceId) {
+    return this.request(`/api/workspaces/${workspaceId}/services/${serviceId}/test`, { method: "POST" });
+  },
+  testWorkspaceServiceDraft(workspaceId, data) {
+    return this.request(`/api/workspaces/${workspaceId}/services/test`, { method: "POST", body: JSON.stringify(data) });
+  },
+  useWorkspaceDefaultCredentials(workspaceId, serviceId) {
+    return this.request(`/api/workspaces/${workspaceId}/services/${serviceId}/use-default-credentials`, { method: "POST" });
+  },
   // Backward compatibility for existing app.js wiring.
   attachWorkspaceService(id, type, payload) {
-    if (type === "s3") return this.attachS3ToWorkspace(id, payload);
     return this.attachServiceToWorkspace(id, {
-      awsConnectionId: payload.aws_connection_id || payload.awsConnectionId,
       serviceType: type,
-      serviceIdentifier:
+      friendlyName: payload.friendly_name || payload.friendlyName || payload.serviceIdentifier || "",
+      accessKeyId: payload.access_key_id || payload.accessKeyId || "",
+      secretAccessKey: payload.secret_access_key || payload.secretAccessKey || "",
+      region: payload.region || "us-east-1",
+      resourceIdentifier:
+        payload.resource_identifier ||
         payload.service_identifier ||
         payload.serviceIdentifier ||
         payload.topic_name ||
@@ -341,10 +353,9 @@ const API = {
         payload.instance_identifier ||
         payload.instance_id ||
         payload.function_name ||
-        payload.secret_name,
-      friendlyName: payload.friendly_name || payload.friendlyName || null,
-      region: payload.region || null,
-      metadata: payload.metadata || null,
+        payload.secret_name ||
+        "",
+      configJson: payload.config_json || payload.configJson || payload.metadata || {},
     });
   },
   detachWorkspaceService(id, _type, serviceId) {
@@ -430,6 +441,14 @@ const API = {
     if (manager) q.set("manager", manager);
     return this.request(`/api/software/package-manager/${serverId}/scan?${q.toString()}`);
   },
+  streamPackageScan(serverId, manager = "") {
+    const q = new URLSearchParams();
+    q.set("stream", "true");
+    if (manager) q.set("manager", manager);
+    const password = localStorage.getItem("oggo-password");
+    if (password) q.set("password", password);
+    return new EventSource(`/api/software/package-manager/${serverId}/scan?${q.toString()}`);
+  },
   packageOperation(serverId, payload) {
     return this.request(`/api/software/package-manager/${serverId}/operate`, {
       method: "POST",
@@ -451,13 +470,31 @@ const API = {
   packageHistory(serverId, limit = 200) {
     return this.request(`/api/software/package-manager/${serverId}/history?limit=${Number(limit || 200)}`);
   },
+  packageHistoryV2(serverId, limit = 100, filter = "all", search = "") {
+    const q = new URLSearchParams({
+      serverId: String(serverId),
+      limit: String(Number(limit || 100)),
+      filter: String(filter || "all"),
+    });
+    if (search) q.set("search", String(search));
+    return this.request(`/api/software/packages/history?${q.toString()}`);
+  },
   packageVulnerabilities(serverId, params) {
     const q = new URLSearchParams(params || {});
     return this.request(`/api/software/package-manager/${serverId}/vulnerabilities?${q.toString()}`);
   },
+  packageCVEs(serverId, manager, packageName, version = "") {
+    const q = new URLSearchParams();
+    if (version) q.set("version", version);
+    return this.request(`/api/software/packages/${encodeURIComponent(serverId)}/${encodeURIComponent(manager)}/${encodeURIComponent(packageName)}/cves?${q.toString()}`);
+  },
   packageVersions(serverId, params) {
     const q = new URLSearchParams(params || {});
     return this.request(`/api/software/package-manager/${serverId}/versions?${q.toString()}`);
+  },
+  packageVersionsV2(serverId, manager, packageName, limit = 10) {
+    const q = new URLSearchParams({ limit: String(Number(limit || 10)) });
+    return this.request(`/api/software/packages/${encodeURIComponent(serverId)}/${encodeURIComponent(manager)}/${encodeURIComponent(packageName)}/versions?${q.toString()}`);
   },
   runInstaller(serverId, payload) {
     return this.request(`/api/software/installer/${serverId}/install`, {
