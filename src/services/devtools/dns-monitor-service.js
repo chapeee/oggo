@@ -36,6 +36,10 @@ async function runDnsLookup(domain, recordType = "A") {
     if (type === "PTR") return await dns.reverse(domain);
     return [];
   } catch (error) {
+    // Missing record types are common and should be treated as empty result, not a hard error.
+    if (["ENODATA", "ENOTFOUND", "ENOENT", "ESERVFAIL", "ENODOMAIN"].includes(String(error.code || "").toUpperCase())) {
+      return [];
+    }
     return { error: error.message, code: error.code || "DNS_ERROR" };
   }
 }
@@ -120,4 +124,3 @@ module.exports = {
   checkDnsMonitor,
   deleteDnsMonitor,
 };
-

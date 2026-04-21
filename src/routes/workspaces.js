@@ -6,9 +6,12 @@ const {
   createWorkspace,
   updateWorkspace,
   deleteWorkspace,
-  attachS3Config,
   attachService,
+  updateService,
   detachService,
+  testServiceAttachment,
+  testServiceDraft,
+  useWorkspaceDefaultCredentials,
   getWorkspaceStats,
 } = require("../services/workspaceService");
 const { buildSearchIndex } = require("../services/searchService");
@@ -58,24 +61,20 @@ router.delete(
 );
 
 router.post(
-  "/:id/s3",
-  asyncHandler(async (req, res) => {
-    const s3ConfigId = String(req.body?.s3ConfigId || "").trim();
-    if (!s3ConfigId) {
-      return res.status(400).json({ error: "s3ConfigId is required", code: "VALIDATION_ERROR" });
-    }
-    const data = await attachS3Config(req.params.id, s3ConfigId, req.body?.label || "");
-    await buildSearchIndex();
-    res.status(201).json(data);
-  })
-);
-
-router.post(
   "/:id/services",
   asyncHandler(async (req, res) => {
     const data = await attachService(req.params.id, req.body || {});
     await buildSearchIndex();
     res.status(201).json(data);
+  })
+);
+
+router.put(
+  "/:id/services/:serviceId",
+  asyncHandler(async (req, res) => {
+    const data = await updateService(req.params.id, req.params.serviceId, req.body || {});
+    await buildSearchIndex();
+    res.status(200).json(data);
   })
 );
 
@@ -85,6 +84,31 @@ router.delete(
     await detachService(req.params.id, req.params.serviceId);
     await buildSearchIndex();
     res.status(204).send();
+  })
+);
+
+router.post(
+  "/:id/services/:serviceId/test",
+  asyncHandler(async (req, res) => {
+    const data = await testServiceAttachment(req.params.id, req.params.serviceId);
+    res.status(200).json(data);
+  })
+);
+
+router.post(
+  "/:id/services/test",
+  asyncHandler(async (req, res) => {
+    const data = await testServiceDraft(req.params.id, req.body || {});
+    res.status(200).json(data);
+  })
+);
+
+router.post(
+  "/:id/services/:serviceId/use-default-credentials",
+  asyncHandler(async (req, res) => {
+    const data = await useWorkspaceDefaultCredentials(req.params.id, req.params.serviceId);
+    await buildSearchIndex();
+    res.status(200).json(data);
   })
 );
 

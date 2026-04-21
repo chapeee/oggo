@@ -24,6 +24,19 @@ const state = {
   packageFilter: "all",
   packageSearch: "",
   packageOps: [],
+  packageRowOps: {},
+  packageCollapsed: {},
+  packageSelected: {},
+  packageLastSelectedByManager: {},
+  packageScanInProgress: false,
+  packageSectionScanningManager: "",
+  packageScanTerminal: [],
+  packageScanProgress: { completed: 0, total: 0 },
+  packageStatDisplay: { totalPackages: 0, updatesAvailable: 0, vulnerabilities: 0 },
+  packagePanel: { type: "", key: "", loading: false, data: null, manager: "", packageName: "", version: "" },
+  packageHistoryPanel: { open: false, filter: "all", search: "", limit: 100 },
+  packageUpdatedToday: {},
+  packageDescCache: {},
   packageAutoScanTimer: null,
   packageAutoScanLastRunAt: 0,
   installerTab: "catalog",
@@ -35,6 +48,7 @@ const state = {
   workspaces: [],
   activeWorkspaceId: "",
   workspaceDetail: null,
+  workspaceServiceTesting: {},
   workspaceSwitcherOpen: false,
   globalSearch: {
     open: false,
@@ -243,6 +257,88 @@ function toast(message, type = "info") {
   node.textContent = message;
   el("toast-container").appendChild(node);
   setTimeout(() => node.remove(), 2800);
+}
+
+async function openSimpleModal(options = {}) {
+  return new Promise((resolve) => {
+    const modal = el("job-modal");
+    const body = el("job-modal-body");
+    const title = options.title || "Confirm";
+    const message = options.message || "";
+    const showInput = Boolean(options.input);
+    const inputType = options.inputType || "text";
+    const inputPlaceholder = options.inputPlaceholder || "";
+    const inputValue = options.inputValue || "";
+    const okLabel = options.okLabel || "Confirm";
+    const cancelLabel = options.cancelLabel || "Cancel";
+    const danger = Boolean(options.danger);
+    body.innerHTML = `
+      <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${escapeHtml(title)}</h3>
+        <button type="button" id="simple-modal-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div class="p-6">
+        <p class="text-sm text-gray-500 dark:text-gray-300">${escapeHtml(message)}</p>
+        ${showInput ? `<input id="simple-modal-input" class="input mt-3" type="${escapeHtml(inputType)}" placeholder="${escapeHtml(inputPlaceholder)}" value="${escapeHtml(inputValue)}" />` : ""}
+        <div class="pt-4 flex gap-2 justify-end">
+          <button id="simple-modal-cancel" class="btn-secondary">${escapeHtml(cancelLabel)}</button>
+          <button id="simple-modal-ok" class="${danger ? "btn-danger" : "btn-primary"}">${escapeHtml(okLabel)}</button>
+        </div>
+      </div>
+    `;
+    modal.classList.remove("hidden");
+    if (window.lucide) window.lucide.createIcons();
+    const close = (result) => {
+      modal.classList.add("hidden");
+      resolve(result);
+    };
+    el("simple-modal-close").onclick = () => close({ ok: false });
+    el("simple-modal-cancel").onclick = () => close({ ok: false });
+    el("simple-modal-ok").onclick = () => {
+      close({
+        ok: true,
+        value: showInput ? String(el("simple-modal-input")?.value || "") : "",
+      });
+    };
+    if (showInput && el("simple-modal-input")) {
+      const input = el("simple-modal-input");
+      input.focus();
+      input.select();
+      input.onkeydown = (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          el("simple-modal-ok").click();
+        }
+      };
+    }
+  });
+}
+
+async function uiConfirm(message, options = {}) {
+  const result = await openSimpleModal({
+    title: options.title || "Confirm Action",
+    message,
+    okLabel: options.okLabel || "Confirm",
+    cancelLabel: options.cancelLabel || "Cancel",
+    danger: options.danger !== false,
+  });
+  return Boolean(result?.ok);
+}
+
+async function uiPrompt(message, options = {}) {
+  const result = await openSimpleModal({
+    title: options.title || "Input Required",
+    message,
+    okLabel: options.okLabel || "Continue",
+    cancelLabel: options.cancelLabel || "Cancel",
+    input: true,
+    inputType: options.inputType || "text",
+    inputPlaceholder: options.placeholder || "",
+    inputValue: options.defaultValue || "",
+    danger: false,
+  });
+  if (!result?.ok) return null;
+  return String(result.value || "");
 }
 
 function isPermissionDeniedError(error) {
@@ -1246,23 +1342,41 @@ function formatWorkspaceServicesSummary(counts = {}) {
   return items.length ? items.join(" · ") : "No services attached";
 }
 
+const WORKSPACE_SERVICE_META = {
+  s3: { label: "S3 Buckets", icon: "database", resourceLabel: "Bucket" },
+  sns: { label: "SNS Topics", icon: "bell-ring", resourceLabel: "Topic ARN" },
+  ses: { label: "SES Identities", icon: "mail", resourceLabel: "Identity" },
+  cloudwatch: { label: "CloudWatch", icon: "scroll-text", resourceLabel: "Log group / prefix" },
+  rds: { label: "RDS", icon: "database-zap", resourceLabel: "Instance endpoint" },
+  ec2: { label: "EC2", icon: "server-cog", resourceLabel: "Instance ID" },
+  lambda: { label: "Lambda", icon: "function-square", resourceLabel: "Function" },
+  secrets: { label: "Secrets Manager", icon: "vault", resourceLabel: "Secret ARN / name" },
+};
+
+function workspaceStatusDot(status) {
+  const s = String(status || "untested").toLowerCase();
+  if (s === "ok") return `<span class="inline-block w-2 h-2 rounded-full bg-green-500"></span>`;
+  if (s === "error") return `<span class="inline-block w-2 h-2 rounded-full bg-red-500" title="Last test failed"></span>`;
+  return `<span class="inline-block w-2 h-2 rounded-full bg-gray-400"></span>`;
+}
+
 function workspacesOverviewHtml() {
   const cards = (state.workspaces || [])
     .map((workspace) => {
-      const connection = workspace.primary_connection || null;
+      const healthError = Number(workspace?.health?.error || 0) > 0;
+      const summary = formatWorkspaceServicesSummary(workspace.serviceCounts || workspace.service_counts || {});
       return `
         <div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm" style="border-left:3px solid ${workspace.color || "#f97316"};">
           <div class="flex items-start justify-between gap-3">
             <div>
               <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(workspace.name)}</h3>
               <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(workspace.description || "No description")}</p>
-              <p class="text-xs mt-2 text-gray-500 dark:text-gray-400">AWS Account: <span class="font-mono">${escapeHtml(connection?.account_id || "Not linked")}</span></p>
-              <p class="text-xs mt-1 text-gray-500 dark:text-gray-400">Region: <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(workspace.default_region || "us-east-1")}</span></p>
+              <p class="text-xs mt-2 text-gray-500 dark:text-gray-400">Region: <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(workspace.defaultRegion || workspace.default_region || "us-east-1")}</span></p>
             </div>
-            <span class="inline-flex items-center text-[11px] px-2 py-1 rounded-full bg-green-500/15 text-green-500">Healthy</span>
+            <span class="inline-flex items-center text-[11px] px-2 py-1 rounded-full ${healthError ? "bg-red-500/15 text-red-500" : "bg-green-500/15 text-green-500"}">${healthError ? "Issues" : "Healthy"}</span>
           </div>
-          <p class="text-xs mt-3 text-gray-600 dark:text-gray-300">${escapeHtml(formatWorkspaceServicesSummary(workspace.service_counts || {}))}</p>
-          <p class="text-xs mt-1 text-gray-500 dark:text-gray-400">Last activity: ${timeAgo(workspace.updated_at || workspace.created_at)}</p>
+          <p class="text-xs mt-3 text-gray-600 dark:text-gray-300">${escapeHtml(summary)}</p>
+          <p class="text-xs mt-1 text-gray-500 dark:text-gray-400">Last activity: ${timeAgo(workspace.updatedAt || workspace.updated_at || workspace.created_at)}</p>
           <div class="mt-4 flex items-center gap-2">
             <button data-workspace-open="${workspace.id}" class="btn-secondary text-xs">Open</button>
             <button data-workspace-edit="${workspace.id}" class="btn-secondary text-xs">Edit</button>
@@ -1297,16 +1411,7 @@ function workspaceDetailHtml() {
     return `<div class="panel"><p class="text-sm text-gray-500">Workspace not found.</p></div>`;
   }
   const services = workspace.services || {};
-  const serviceSections = [
-    { key: "s3", label: "S3 Buckets", icon: "database", subtitle: "Storage configs attached to this workspace" },
-    { key: "sns", label: "SNS Topics", icon: "bell-ring", subtitle: "Topics available for notifications" },
-    { key: "ses", label: "SES Identities", icon: "mail", subtitle: "Sending identities and mail setup" },
-    { key: "cloudwatch", label: "CloudWatch", icon: "scroll-text", subtitle: "Log groups and monitoring streams" },
-    { key: "rds", label: "RDS", icon: "database-zap", subtitle: "Database instances attached to this workspace" },
-    { key: "ec2", label: "EC2", icon: "server-cog", subtitle: "Compute instances attached to this workspace" },
-    { key: "lambda", label: "Lambda", icon: "function-square", subtitle: "Functions and execution details" },
-    { key: "secrets", label: "Secrets Manager", icon: "vault", subtitle: "Managed secrets linked to workspace" },
-  ];
+  const serviceSections = Object.keys(WORKSPACE_SERVICE_META).map((key) => ({ key, ...WORKSPACE_SERVICE_META[key] }));
 
   return `
     <div class="space-y-4">
@@ -1315,13 +1420,21 @@ function workspaceDetailHtml() {
           <div>
             <h2 class="text-2xl font-semibold">${escapeHtml(workspace.name)}</h2>
             <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(workspace.description || "No description")}</p>
-            <p class="text-xs mt-2 text-gray-500 dark:text-gray-400">Region: <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(workspace.default_region || "us-east-1")}</span></p>
+            <p class="text-xs mt-2 text-gray-500 dark:text-gray-400">Region: <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(workspace.defaultRegion || workspace.default_region || "us-east-1")}</span></p>
           </div>
           <div class="flex items-center gap-2">
             <button data-workspace-edit="${workspace.id}" class="btn-secondary text-xs">Edit</button>
             <button data-workspace-delete="${workspace.id}" class="text-red-600 dark:text-red-400 text-sm">Delete</button>
           </div>
         </div>
+      </div>
+      <div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4">
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold">Default credentials</h3>
+          <button class="btn-secondary text-xs" data-workspace-default-credentials="1">Edit defaults</button>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">These credentials can be reused when adding services. They are stored encrypted.</p>
+        <div class="text-xs mt-2 ${workspace.hasDefaultCredentials ? "text-green-500" : "text-gray-500"}">${workspace.hasDefaultCredentials ? "Configured" : "Not configured"}</div>
       </div>
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
         ${serviceSections
@@ -1332,30 +1445,41 @@ function workspaceDetailHtml() {
                 <div class="flex items-center justify-between">
                   <div>
                     <h3 class="font-semibold flex items-center gap-2"><i data-lucide="${section.icon}" class="w-4 h-4"></i>${section.label}</h3>
-                    <p class="text-xs text-gray-500 mt-1">${section.subtitle}</p>
+                    <p class="text-xs text-gray-500 mt-1">No services attached yet.</p>
                   </div>
                   <button data-workspace-add-service="${section.key}" class="btn-secondary text-xs">Add</button>
                 </div>
-                <p class="text-xs text-gray-500 mt-3">No ${section.label.toLowerCase()} attached.</p>
+                <p class="text-xs text-gray-500 mt-3">Attach ${section.label.toLowerCase()} with per-service credentials.</p>
               </div>`;
             }
             return `<div class="bg-white dark:bg-[#111827] border border-gray-200 dark:border-gray-700 rounded-xl p-4">
               <div class="flex items-center justify-between">
                 <div>
                   <h3 class="font-semibold flex items-center gap-2"><i data-lucide="${section.icon}" class="w-4 h-4"></i>${section.label}</h3>
-                  <p class="text-xs text-gray-500 mt-1">${section.subtitle}</p>
+                  <p class="text-xs text-gray-500 mt-1">${rows.length} attached</p>
                 </div>
                 <button data-workspace-add-service="${section.key}" class="btn-secondary text-xs">Add</button>
               </div>
               <div class="mt-3 space-y-2">
-                ${rows
-                  .slice(0, 4)
-                  .map((row) => `<div class="rounded-lg border border-gray-200 dark:border-gray-700 p-2 text-sm">
-                    <div class="font-medium">${escapeHtml(row.name || row.topic_name || row.identity || row.instance_identifier || row.instance_id || row.function_name || row.secret_name || row.s3_config_id || "Item")}</div>
-                    <div class="text-xs text-gray-500 mt-1">${escapeHtml(row.region || row.bucket_name || row.topic_arn || row.log_group_prefix || row.secret_arn || "workspace service")}</div>
-                  </div>`)
-                  .join("")}
-                ${rows.length > 4 ? `<p class="text-xs text-gray-500">+${rows.length - 4} more</p>` : ""}
+                ${rows.map((row) => `<div class="rounded-lg border border-gray-200 dark:border-gray-700 p-2 text-sm">
+                    <div class="flex items-start justify-between gap-2">
+                      <div>
+                        <div class="font-medium">${escapeHtml(row.friendlyName || row.friendly_name || "Service")}</div>
+                        <div class="text-xs text-gray-500 mt-1 font-mono truncate max-w-[340px]" title="${escapeHtml(row.resourceIdentifier || row.resource_identifier || "")}">${escapeHtml(row.resourceIdentifier || row.resource_identifier || "")}</div>
+                        <div class="text-xs text-gray-500 mt-1">
+                          <span class="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800">${escapeHtml(row.region || "us-east-1")}</span>
+                          <span class="ml-2 inline-flex items-center gap-1">${workspaceStatusDot(row.status)} ${escapeHtml((row.status || "untested").toLowerCase())}</span>
+                          ${row.lastTestedAt ? `<span class="ml-2">Tested ${timeAgo(row.lastTestedAt)}</span>` : ""}
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <button class="btn-secondary text-xs" data-workspace-service-test="${row.id}">${state.workspaceServiceTesting[row.id] ? "Testing..." : "Test"}</button>
+                        <button class="btn-secondary text-xs" data-workspace-service-edit="${row.id}" data-workspace-service-type="${section.key}">Edit</button>
+                        <button class="text-red-500 text-xs" data-workspace-service-delete="${row.id}">Remove</button>
+                      </div>
+                    </div>
+                    ${row.status === "error" && row.errorMessage ? `<div class="text-[11px] text-red-400 mt-1">${escapeHtml(row.errorMessage)}</div>` : ""}
+                  </div>`).join("")}
               </div>
             </div>`;
           })
@@ -1478,6 +1602,25 @@ function dnsMonitorHtml() {
       </div>
     </div>
   `;
+}
+
+function formatDnsLookupResult(result) {
+  if (!result || typeof result !== "object") return String(result || "");
+  if (Array.isArray(result)) {
+    return result.length ? JSON.stringify(result) : "No records found";
+  }
+  const entries = Object.entries(result);
+  if (!entries.length) return "No records found";
+  const parts = entries.map(([type, value]) => {
+    if (value && typeof value === "object" && value.error) {
+      return `${type}: error (${value.code || "DNS_ERROR"})`;
+    }
+    if (Array.isArray(value) && value.length === 0) {
+      return `${type}: no records`;
+    }
+    return `${type}: ${JSON.stringify(value)}`;
+  });
+  return parts.join(" | ");
 }
 
 function portScannerHtml() {
@@ -2155,69 +2298,179 @@ function packageCounts(packages) {
   );
 }
 
-function operationPanelHtml() {
-  const active = state.packageOps.find((item) => item.status === "running");
-  if (!active) return "";
-  const panelTone =
-    active.status === "failed"
-      ? "border-red-500/40"
-      : active.status === "success"
-        ? "border-green-500/40"
-        : "border-orange-500/30";
-  const progress = Math.max(5, Math.min(100, Number(active.progress || 0)));
-  const output = String(active.output || "").trim();
+function packageRowStateClass(pkg) {
+  const key = packageKey(pkg.manager, pkg.name);
+  return state.packageUpdatedToday[key] ? "pkg-row-updated-today" : "";
+}
+
+function updateTypeClass(type) {
+  if (type === "PATCH") return "pkg-badge pkg-badge-patch";
+  if (type === "MINOR") return "pkg-badge pkg-badge-minor";
+  if (type === "MAJOR") return "pkg-badge pkg-badge-major";
+  return "pkg-badge pkg-badge-none";
+}
+
+function latestVersionClass(pkg) {
+  if (!pkg.latestVersion || pkg.latestVersion === pkg.installedVersion) return "text-gray-500";
+  if (pkg.updateType === "PATCH") return "text-green-500";
+  if (pkg.updateType === "MINOR") return "text-orange-400";
+  if (pkg.updateType === "MAJOR") return "text-red-500";
+  return "text-orange-500";
+}
+
+function renderPackageOperationRow(pkg) {
+  const op = state.packageRowOps[packageKey(pkg.manager, pkg.name)];
+  if (!op) return "";
+  const toneClass = op.status === "failed" ? "pkg-op-failed" : op.status === "success" ? "pkg-op-success" : "";
+  const lines = (op.lines || [])
+    .map((line) => `<div class="pkg-op-line pkg-op-${escapeHtml(line.tone || "muted")}">${escapeHtml(line.text || "")}</div>`)
+    .join("");
   return `
-    <div class="mt-3 p-3 rounded-xl border ${panelTone} bg-[#0d1117] text-gray-100">
-      <div class="flex items-center justify-between text-xs">
-        <div>
-          <span class="font-semibold">${escapeHtml(active.packageName)}</span>
-          <span class="text-gray-400 ml-2">${escapeHtml(active.operation)}</span>
+    <tr class="pkg-op-row">
+      <td colspan="7">
+        <div class="pkg-op-panel ${toneClass}">
+          <div class="pkg-op-head">
+            <div class="pkg-op-title">${escapeHtml(op.title || "Running operation")}</div>
+            <div class="pkg-op-status">${escapeHtml(String(op.status || "running").toUpperCase())}</div>
+          </div>
+          <div class="pkg-op-progress"><div class="pkg-op-progress-fill ${toneClass}" style="width:${Math.max(0, Math.min(100, Number(op.progress || 0)))}%"></div></div>
+          <div class="pkg-op-terminal">${lines || '<div class="pkg-op-line pkg-op-muted">Running...</div>'}</div>
+          ${op.status === "failed" ? `<div class="pkg-op-actions"><button class="btn-secondary text-xs" data-package-row-retry="${escapeHtml(op.id)}">Retry</button><button class="btn-secondary text-xs" data-package-copy-error="${escapeHtml(op.id)}">Copy error</button></div>` : ""}
         </div>
-        <div class="${active.status === "success" ? "text-green-400" : active.status === "failed" ? "text-red-400" : "text-orange-300"}">${escapeHtml(active.status.toUpperCase())}</div>
-      </div>
-      <div class="h-2 bg-gray-800 rounded mt-2 overflow-hidden">
-        <div class="h-full ${active.status === "failed" ? "bg-red-500" : active.status === "success" ? "bg-green-500" : "bg-orange-500"} transition-all duration-500" style="width:${progress}%"></div>
-      </div>
-      <pre class="text-[11px] leading-5 mt-2 max-h-40 overflow-auto whitespace-pre-wrap">${escapeHtml(output || "Running...")}</pre>
-      ${active.status === "failed" ? `<div class="pt-2"><button class="btn-secondary text-xs" data-package-retry="${active.id}">Retry</button></div>` : ""}
-    </div>
+      </td>
+    </tr>
   `;
 }
 
-function packageRowsHtml(packages) {
-  const filtered = getFilteredPackages(packages);
+function renderVersionPanelRow(pkg) {
+  if (state.packagePanel.type !== "versions" || state.packagePanel.key !== packageKey(pkg.manager, pkg.name)) return "";
+  const rows = Array.isArray(state.packagePanel.data) ? state.packagePanel.data : [];
+  const installed = String(state.packagePanel.version || "");
+  const top = rows[0]?.version || "";
+  return `
+    <tr class="pkg-inline-row">
+      <td colspan="7">
+        <div class="pkg-inline-panel">
+          <div class="pkg-inline-head">
+            <div class="font-semibold">Version history — ${escapeHtml(pkg.name)}</div>
+            <button class="btn-secondary text-xs" data-package-panel-close="1">Close</button>
+          </div>
+          ${state.packagePanel.loading ? '<div class="text-xs text-gray-500">Loading versions...</div>' : ""}
+          ${state.packagePanel.error ? `<div class="text-xs text-red-500">${escapeHtml(state.packagePanel.error)}</div>` : ""}
+          ${
+            !state.packagePanel.loading
+              ? `<div class="overflow-x-auto"><table class="w-full text-xs">
+                   <thead><tr><th class="py-1 text-left">Version</th><th class="py-1 text-left">Date</th><th class="py-1 text-left">Age</th><th class="py-1 text-left">Size</th><th class="py-1 text-right">Action</th></tr></thead>
+                   <tbody>
+                     ${
+                       rows
+                         .map((row) => {
+                           const version = String(row.version || "");
+                           const isCurrent = version === installed;
+                           const isLatest = version === top;
+                           const isDowngrade = olderVersionThan(version, installed);
+                           const actionLabel = isDowngrade ? "Downgrade" : "Install";
+                           return `<tr class="border-b border-gray-100 dark:border-gray-800">
+                             <td class="py-2">
+                               <span class="font-semibold">${escapeHtml(version)}</span>
+                               ${isCurrent ? '<span class="pkg-mini-badge">current</span>' : ""}
+                               ${isLatest ? '<span class="pkg-mini-badge pkg-mini-badge-latest">latest</span>' : ""}
+                             </td>
+                             <td class="py-2">${row.date ? escapeHtml(new Date(row.date).toLocaleDateString()) : "-"}</td>
+                             <td class="py-2">${row.date ? escapeHtml(toRelativeDays(row.date)) : "-"}</td>
+                             <td class="py-2">${Number(row.size || 0) > 0 ? `${Math.round(Number(row.size || 0) / 1024)} KB` : "-"}</td>
+                             <td class="py-2 text-right">${isCurrent ? '<span class="text-gray-500">current</span>' : `<button class="btn-secondary text-xs ${isDowngrade ? "text-orange-500" : ""}" data-package-install-version="${escapeHtml(version)}" data-manager="${escapeHtml(pkg.manager)}" data-name="${escapeHtml(pkg.name)}" data-installed="${escapeHtml(installed)}">${actionLabel}</button>`}</td>
+                           </tr>`;
+                         })
+                         .join("") || '<tr><td class="py-2 text-gray-500" colspan="5">No versions found.</td></tr>'
+                     }
+                   </tbody>
+                 </table></div>`
+              : ""
+          }
+        </div>
+      </td>
+    </tr>
+  `;
+}
 
+function renderCvePanelRow(pkg) {
+  if (state.packagePanel.type !== "cves" || state.packagePanel.key !== packageKey(pkg.manager, pkg.name)) return "";
+  const rows = Array.isArray(state.packagePanel.data) ? state.packagePanel.data : [];
+  return `
+    <tr class="pkg-inline-row">
+      <td colspan="7">
+        <div class="pkg-inline-panel pkg-inline-cve">
+          <div class="pkg-inline-head">
+            <div class="font-semibold">CVE details — ${escapeHtml(pkg.name)}</div>
+            <button class="btn-secondary text-xs" data-package-panel-close="1">Close</button>
+          </div>
+          ${state.packagePanel.loading ? '<div class="text-xs text-gray-500">Loading CVEs...</div>' : ""}
+          ${state.packagePanel.error ? `<div class="text-xs text-red-500">${escapeHtml(state.packagePanel.error)}</div>` : ""}
+          ${
+            !state.packagePanel.loading
+              ? `<div class="space-y-2 max-h-64 overflow-auto">
+                   ${
+                     rows
+                       .map((cve) => {
+                         const sev = String(cve.severity || "UNKNOWN").toUpperCase();
+                         const sevClass = sev === "CRITICAL" ? "pkg-sev-critical" : sev === "HIGH" ? "pkg-sev-high" : sev === "MEDIUM" ? "pkg-sev-medium" : sev === "LOW" ? "pkg-sev-low" : "";
+                         return `<div class="pkg-cve-item">
+                           <div class="flex items-center justify-between gap-2">
+                             <a href="${escapeHtml(cve.referenceUrl || "#")}" target="_blank" rel="noreferrer" class="font-semibold text-orange-400 hover:underline">${escapeHtml(cve.id || "CVE")}</a>
+                             <span class="pkg-cve-sev ${sevClass}">${escapeHtml(sev)}${cve.cvss ? ` ${escapeHtml(String(cve.cvss))}` : ""}</span>
+                           </div>
+                           <div class="text-xs text-gray-400 mt-1">${escapeHtml(cve.description || "")}</div>
+                           <div class="text-xs text-gray-500 mt-1">Affected: ${escapeHtml((cve.affectedVersions || []).join(", ") || "-")}</div>
+                           <div class="text-xs text-green-500 mt-1">Fixed in: ${escapeHtml(cve.fixedVersion || "n/a")}</div>
+                           ${cve.fixedVersion ? `<button class="btn-secondary text-xs mt-2" data-package-fix-cve="${escapeHtml(cve.fixedVersion)}" data-manager="${escapeHtml(pkg.manager)}" data-name="${escapeHtml(pkg.name)}" data-installed="${escapeHtml(pkg.installedVersion || "")}">Update to ${escapeHtml(cve.fixedVersion)} to fix this</button>` : ""}
+                         </div>`;
+                       })
+                       .join("") || '<div class="text-xs text-gray-500">No CVEs returned.</div>'
+                   }
+                 </div>`
+              : ""
+          }
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function packageRowsHtml(section) {
+  const filtered = getFilteredPackages(section.packages || []);
+  const manager = section.manager;
+  const selectedMap = state.packageSelected[manager] || {};
   return filtered
     .map((pkg) => {
+      const key = packageKey(pkg.manager, pkg.name);
       const hasUpdate = pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion;
-      const updateTypeClass =
-        pkg.updateType === "PATCH"
-          ? "bg-green-500/20 text-green-500"
-          : pkg.updateType === "MINOR"
-            ? "bg-orange-500/20 text-orange-400"
-            : pkg.updateType === "MAJOR"
-              ? "bg-red-500/20 text-red-500"
-              : "bg-gray-500/20 text-gray-400";
-      return `
-        <tr class="border-b border-gray-100 dark:border-gray-800">
+      const description = state.packageDescCache[key] || pkg.description || "No description available";
+      const selected = Boolean(selectedMap[pkg.name]);
+      const nameDot = pkg.pinned ? '<span class="pkg-pin-dot"></span>' : "";
+      const todayBadge = state.packageUpdatedToday[key] ? '<span class="pkg-mini-badge pkg-mini-badge-updated">updated today</span>' : "";
+      const row = `
+        <tr class="border-b border-gray-100 dark:border-gray-800 ${packageRowStateClass(pkg)}" data-pkg-row="${escapeHtml(pkg.name)}" data-manager="${escapeHtml(pkg.manager)}">
+          <td class="py-2 px-3"><input type="checkbox" data-package-select-row="1" data-manager="${escapeHtml(pkg.manager)}" data-name="${escapeHtml(pkg.name)}" ${selected ? "checked" : ""} /></td>
           <td class="py-2 px-3">
-            <div class="font-medium">${escapeHtml(pkg.name)}</div>
-            <div class="text-[11px] text-gray-500 mt-0.5">${escapeHtml(pkg.description || "No description available")}</div>
+            <div class="font-medium font-mono truncate" title="${escapeHtml(pkg.name)}">${nameDot}${escapeHtml(pkg.name)} ${todayBadge}</div>
+            <div class="text-[11px] text-gray-500 mt-0.5 truncate" title="${escapeHtml(description)}">${escapeHtml(description)}</div>
           </td>
-          <td class="py-2 px-3 text-xs">${escapeHtml(pkg.installedVersion || "-")}</td>
-          <td class="py-2 px-3 text-xs ${hasUpdate ? "text-orange-500" : "text-gray-500"}">${escapeHtml(pkg.latestVersion || pkg.installedVersion || "-")}</td>
-          <td class="py-2 px-3"><span class="px-2 py-1 rounded-full text-[11px] ${updateTypeClass}">${escapeHtml(pkg.updateType || "NONE")}</span></td>
-          <td class="py-2 px-3">${Number(pkg.vulnCount || 0) > 0 ? `<button class="px-2 py-1 rounded-full text-[11px] bg-red-500/20 text-red-500 hover:bg-red-500/30" data-package-action="vulns" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">${Number(pkg.vulnCount)} CVE</button>` : `<span class="text-xs text-gray-500">-</span>`}</td>
+          <td class="py-2 px-3 text-xs font-mono ${pkg.installedVersion ? "" : "text-red-400"}">${escapeHtml(pkg.installedVersion || "unknown")}</td>
+          <td class="py-2 px-3 text-xs font-mono ${latestVersionClass(pkg)}">${escapeHtml(pkg.latestVersion || pkg.installedVersion || "-")}</td>
+          <td class="py-2 px-3"><span class="${updateTypeClass(pkg.updateType || "NONE")}" ${pkg.updateType === "MAJOR" ? 'title="This is a major version jump. Check the migration guide before updating."' : ""}>${escapeHtml(pkg.updateType || "NONE")}</span></td>
+          <td class="py-2 px-3">${Number(pkg.vulnCount || 0) > 0 ? `<button class="px-2 py-1 rounded-full text-[11px] bg-red-500/20 text-red-500 hover:bg-red-500/30" data-package-action="vulns" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">⚠ ${Number(pkg.vulnCount)} CVE</button>` : `<span class="text-xs text-gray-500">-</span>`}</td>
           <td class="py-2 px-3 text-right">
-            <div class="inline-flex gap-2">
-              ${hasUpdate ? `<button class="btn-secondary text-xs" data-package-action="update" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-from="${escapeHtml(pkg.installedVersion || "")}" data-to="${escapeHtml(pkg.latestVersion || "")}" data-type="${escapeHtml(pkg.updateType || "UNKNOWN")}">Update</button>` : ""}
-              <button class="btn-secondary text-xs" data-package-action="${pkg.pinned ? "unpin" : "pin"}" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">${pkg.pinned ? `<span class="text-orange-500">📌</span> Unpin` : "Pin"}</button>
+            <div class="inline-flex gap-2 pkg-row-actions">
+              ${hasUpdate ? `<button class="btn-secondary text-xs" data-package-action="update" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-from="${escapeHtml(pkg.installedVersion || "")}" data-to="${escapeHtml(pkg.latestVersion || "")}" data-type="${escapeHtml(pkg.updateType || "UNKNOWN")}" data-pinned="${pkg.pinned ? "1" : "0"}">Update</button>` : ""}
+              <button class="btn-secondary text-xs ${pkg.pinned ? "text-orange-500" : ""}" data-package-action="${pkg.pinned ? "unpin" : "pin"}" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">${pkg.pinned ? "📌 Unpin" : "Pin"}</button>
               <button class="btn-secondary text-xs" data-package-action="versions" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}" data-version="${escapeHtml(pkg.installedVersion || "")}">Versions</button>
               <button class="btn-secondary text-xs text-red-500" data-package-action="uninstall" data-manager="${pkg.manager}" data-name="${escapeHtml(pkg.name)}">Uninstall</button>
             </div>
           </td>
         </tr>
       `;
+      return `${row}${renderPackageOperationRow(pkg, filtered.length)}${renderVersionPanelRow(pkg)}${renderCvePanelRow(pkg)}`;
     })
     .join("");
 }
@@ -2226,40 +2479,49 @@ function softwarePackageManagerHtml() {
   const scan = state.packageScan;
   const hasScan = Boolean(scan && Array.isArray(scan.sections));
   const counts = packageCounts((scan?.sections || []).flatMap((section) => section.packages || []));
-  const total = Math.max(1, Number(counts.total || 0));
-  const updatesPct = Math.round(((counts.outdated || 0) / total) * 100);
-  const vulnPct = Math.round(((counts.vulnerable || 0) / total) * 100);
+  const statDisplay = state.packageStatDisplay || {};
+  const statTotal = Math.max(1, Number(statDisplay.totalPackages || counts.total || 0));
+  const updatesPct = Math.round(((Number(statDisplay.updatesAvailable || counts.outdated || 0)) / statTotal) * 100);
+  const vulnPct = Math.min(100, Number(statDisplay.vulnerabilities || counts.vulnerable || 0) * 20);
+  const scanAt = scan?.scannedAt ? new Date(scan.scannedAt) : null;
+  const outdatedScan = scanAt ? (Date.now() - scanAt.getTime()) > (7 * 24 * 60 * 60 * 1000) : false;
+  const globalProgressTotal = Math.max(1, Number(state.packageScanProgress.total || 1));
+  const globalProgressPct = Math.round((Number(state.packageScanProgress.completed || 0) / globalProgressTotal) * 100);
   const filterPill = (key, label, count) =>
     `<button data-package-filter-pill="${key}" class="px-3 py-1.5 rounded-full border text-xs ${state.packageFilter === key ? "border-orange-500 text-orange-500 bg-orange-500/10" : "border-gray-300 dark:border-gray-700 text-gray-500 hover:text-gray-200"}">${label} (${count})</button>`;
   const sections = hasScan
     ? scan.sections
+        .filter((section) => getFilteredPackages(section.packages || []).length > 0)
         .map(
           (section) => `
-      <div class="panel">
-        <div class="flex items-center justify-between gap-3 mb-3">
+      <div class="panel pkg-section-card ${state.packageCollapsed[section.manager] ? "pkg-section-collapsed" : ""} ${state.packageScanInProgress && state.packageSectionScanningManager === section.manager ? "pkg-section-scanning" : ""}">
+        <div class="flex items-center justify-between gap-3 mb-3 pkg-section-head" data-toggle-section="${section.manager}">
           <div>
-            <div class="font-semibold">${escapeHtml(section.managerLabel)} <span class="text-xs text-gray-500">(${escapeHtml(section.managerVersion || "Unknown")})</span></div>
+            <div class="font-semibold font-mono">${escapeHtml(section.managerLabel)} <span class="text-xs text-gray-500">(${escapeHtml(section.managerVersion || "Unknown")})</span> ${state.packageScanInProgress && state.packageSectionScanningManager === section.manager ? '<span class="ml-2 text-orange-400 text-xs">⏳ scanning</span>' : ""}</div>
+            ${section.managerPath ? `<div class="text-[11px] text-gray-500 font-mono truncate max-w-[360px]" title="${escapeHtml(section.managerPath)}">${escapeHtml(section.managerPath.length > 60 ? `${section.managerPath.slice(0, 60)}...` : section.managerPath)}</div>` : ""}
             <div class="text-xs text-gray-500">${section.packageCount} packages • ${section.outdatedCount} outdated • ${section.vulnerableCount} vulnerable</div>
           </div>
           <div class="inline-flex gap-2">
-            <button class="btn-secondary text-xs" data-package-action="bulk-update" data-manager="${section.manager}">Bulk update</button>
+            ${section.outdatedCount > 0 ? `<button class="btn-secondary text-xs" data-package-action="bulk-update" data-manager="${section.manager}">Bulk update</button>` : ""}
             <button class="btn-secondary text-xs" data-scan-manager="${section.manager}">Scan Section</button>
+            <button class="btn-secondary text-xs" data-toggle-section="${section.manager}">${state.packageCollapsed[section.manager] ? "Expand" : "Collapse"}</button>
           </div>
         </div>
-        <div class="overflow-x-auto">
+        <div class="overflow-x-auto ${state.packageCollapsed[section.manager] ? "hidden" : ""}">
           <table class="w-full text-sm">
             <thead>
               <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
+                <th class="py-2 px-3"><input type="checkbox" data-package-select-all="1" data-manager="${section.manager}" /></th>
                 <th class="py-2 px-3">Name</th>
                 <th class="py-2 px-3">Installed</th>
                 <th class="py-2 px-3">Latest</th>
-                <th class="py-2 px-3">Type</th>
+                <th class="py-2 px-3">Update Type</th>
                 <th class="py-2 px-3">Security</th>
                 <th class="py-2 px-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              ${packageRowsHtml(section.packages)}
+              ${packageRowsHtml(section)}
             </tbody>
           </table>
         </div>
@@ -2277,24 +2539,35 @@ function softwarePackageManagerHtml() {
             <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">Server</div>
             <select id="software-server-select" class="input bg-white dark:bg-gray-800">${softwareServerOptionsHtml()}</select>
           </div>
-          <button id="software-scan-btn" class="btn-primary">Scan now</button>
+          <button id="software-scan-btn" class="btn-primary">${state.packageScanInProgress ? '<span class="pkg-spin">⏳</span> Scanning...' : "Scan now"}</button>
           <button id="software-history-btn" class="btn-secondary">History</button>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
           <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg px-3 py-2">
-            <div class="text-xs text-gray-500">Total packages</div><div class="text-xl font-semibold">${scan?.stats?.totalPackages || 0}</div>
+            <div class="text-xs text-gray-500">Total packages</div><div class="text-xl font-semibold">${Number(statDisplay.totalPackages || scan?.stats?.totalPackages || 0)}</div>
             <div class="h-1.5 rounded bg-gray-200 dark:bg-gray-700 mt-2 overflow-hidden"><div class="h-full bg-blue-500" style="width:100%"></div></div>
           </div>
           <div class="bg-orange-500/10 rounded-lg px-3 py-2">
-            <div class="text-xs text-orange-400">Updates available</div><div class="text-xl font-semibold text-orange-500">${scan?.stats?.updatesAvailable || 0}</div>
+            <div class="text-xs text-orange-400">Updates available</div><div class="text-xl font-semibold text-orange-500">${Number(statDisplay.updatesAvailable || scan?.stats?.updatesAvailable || 0)}</div>
             <div class="h-1.5 rounded bg-orange-900/30 mt-2 overflow-hidden"><div class="h-full bg-orange-500" style="width:${updatesPct}%"></div></div>
           </div>
           <div class="bg-red-500/10 rounded-lg px-3 py-2">
-            <div class="text-xs text-red-400">Vulnerabilities</div><div class="text-xl font-semibold text-red-500">${scan?.stats?.vulnerabilities || 0}</div>
+            <div class="text-xs text-red-400">Vulnerabilities</div><div class="text-xl font-semibold text-red-500">${Number(statDisplay.vulnerabilities || scan?.stats?.vulnerabilities || 0)}</div>
             <div class="h-1.5 rounded bg-red-900/30 mt-2 overflow-hidden"><div class="h-full bg-red-500" style="width:${vulnPct}%"></div></div>
           </div>
-          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg px-3 py-2"><div class="text-xs text-gray-500">Last scan</div><div class="text-sm font-semibold">${scan?.scannedAt ? new Date(scan.scannedAt).toLocaleString() : "Not scanned"}</div></div>
+          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg px-3 py-2"><div class="text-xs text-gray-500">Last scan</div><div class="text-sm font-semibold">${scan?.scannedAt ? new Date(scan.scannedAt).toLocaleString() : "Not scanned"} ${outdatedScan ? '<span class="pkg-mini-badge pkg-mini-badge-outdated">Scan outdated</span>' : ""}</div></div>
         </div>
+        ${state.packageScanInProgress || state.packageScanTerminal.length ? `
+          <div class="pkg-scan-terminal-wrap mt-4">
+            <div class="pkg-scan-progress"><div class="pkg-scan-progress-fill ${!state.packageScanInProgress ? "pkg-scan-progress-done" : ""}" style="width:${state.packageScanInProgress ? globalProgressPct : 100}%"></div></div>
+            <div class="pkg-scan-terminal">
+              ${
+                state.packageScanTerminal
+                  .map((line) => `<div class="pkg-op-line pkg-op-${escapeHtml(line.tone || "muted")}">${escapeHtml(line.text)}</div>`)
+                  .join("") || '<div class="pkg-op-line pkg-op-muted">Ready.</div>'
+              }
+            </div>
+          </div>` : ""}
         <div class="flex flex-wrap gap-3 mt-4 items-center">
           <input id="software-package-search" class="input min-w-[220px] max-w-sm" placeholder="Search package..." value="${escapeHtml(state.packageSearch || "")}" />
           <div class="flex flex-wrap gap-2">
@@ -2304,9 +2577,27 @@ function softwarePackageManagerHtml() {
             ${filterPill("pinned", "Pinned", counts.pinned)}
           </div>
         </div>
-        ${operationPanelHtml()}
       </div>
       ${sections}
+      ${state.packageHistoryPanel.open ? '<div id="package-history-overlay" class="pkg-history-overlay"></div>' : ""}
+      ${state.packageHistoryPanel.open ? `<aside class="pkg-history-panel">
+        <div class="pkg-history-head"><div class="font-semibold">Operation history</div><button class="btn-secondary text-xs" data-history-close="1">Close</button></div>
+        <div class="pkg-history-filters">
+          ${["all", "update", "downgrade", "uninstall", "scan", "failed"].map((f) => `<button class="btn-secondary text-xs ${state.packageHistoryPanel.filter === f ? "ring-1 ring-orange-500" : ""}" data-history-filter="${f}">${f}</button>`).join("")}
+        </div>
+        <div class="flex gap-2 mt-2"><input id="package-history-search" class="input" placeholder="Search package name" value="${escapeHtml(state.packageHistoryPanel.search || "")}" /><button class="btn-secondary text-xs" data-history-export="1">Export CSV</button></div>
+        <div class="pkg-history-list">
+          ${
+            (state.packageHistory || []).map((row) => `
+              <details class="pkg-history-item">
+                <summary><span>${escapeHtml(row.action || "op")} · ${escapeHtml(row.package_name || "-")} <span class="pkg-mini-badge">${escapeHtml(row.package_manager || "")}</span></span><span class="${row.status === "success" ? "text-green-500" : "text-red-500"}">${escapeHtml(row.status || "")}</span></summary>
+                <div class="text-xs text-gray-500 mt-1">${escapeHtml(new Date(row.created_at).toLocaleString())} · ${escapeHtml(row.from_version || "-")} -> ${escapeHtml(row.to_version || "-")}</div>
+                <pre class="pkg-history-output">${escapeHtml(row.output || "")}</pre>
+              </details>
+            `).join("") || '<div class="text-xs text-gray-500">No history entries.</div>'
+          }
+        </div>
+      </aside>` : ""}
     </div>
   `;
 }
@@ -2674,21 +2965,39 @@ async function loadWorkspaceDetail(workspaceId) {
   if (!workspaceId) return;
   state.workspaceDetail = await window.OggoAPI.getWorkspace(workspaceId);
   state.activeWorkspaceId = workspaceId;
+  const stale = [];
+  const services = state.workspaceDetail?.services || {};
+  for (const key of Object.keys(services)) {
+    for (const service of services[key] || []) {
+      const tested = service.lastTestedAt ? new Date(service.lastTestedAt).getTime() : 0;
+      if (!tested || Date.now() - tested > 24 * 60 * 60 * 1000) {
+        stale.push(service.id);
+      }
+    }
+  }
+  if (stale.length) {
+    stale.slice(0, 4).forEach(async (serviceId) => {
+      try {
+        state.workspaceServiceTesting[serviceId] = true;
+        render();
+        bindViewEvents();
+        await window.OggoAPI.testWorkspaceService(workspaceId, serviceId);
+      } catch (_error) {
+        // no-op
+      } finally {
+        delete state.workspaceServiceTesting[serviceId];
+        state.workspaceDetail = await window.OggoAPI.getWorkspace(workspaceId);
+        render();
+        bindViewEvents();
+      }
+    });
+  }
 }
 
 function openWorkspaceModal(workspace = null) {
   const modal = el("job-modal");
   const body = el("job-modal-body");
-  const connectionOptions = state.awsConnections
-    .map(
-      (conn) => `<label class="flex items-center gap-2 text-sm">
-      <input type="checkbox" name="awsConnectionIds" value="${conn.id}" ${
-        workspace?.aws_connections?.some((row) => row.aws_connection_id === conn.id) ? "checked" : ""
-      } />
-      <span>${escapeHtml(conn.name)} <span class="text-xs text-gray-500">(${escapeHtml(conn.default_region || "")})</span></span>
-    </label>`
-    )
-    .join("");
+  const hasDefaults = Boolean(workspace?.hasDefaultCredentials);
   body.innerHTML = `
     <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
       <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${workspace ? "Edit Workspace" : "New Workspace"}</h3>
@@ -2703,13 +3012,17 @@ function openWorkspaceModal(workspace = null) {
         ${field(
           "Default region",
           `<select name="default_region" class="input">${state.awsRegions
-            .map((r) => `<option value="${r.id}" ${(workspace?.default_region || "us-east-1") === r.id ? "selected" : ""}>${r.name} (${r.id})</option>`)
+            .map((r) => `<option value="${r.id}" ${(workspace?.defaultRegion || workspace?.default_region || "us-east-1") === r.id ? "selected" : ""}>${r.name} (${r.id})</option>`)
             .join("")}</select>`
         )}
       </div>
       <div class="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-3">
-        <div class="text-sm font-medium mb-2">AWS Connections</div>
-        <div class="space-y-1 max-h-32 overflow-auto">${connectionOptions || '<div class="text-xs text-gray-500">No AWS connections yet.</div>'}</div>
+        <div class="text-sm font-medium mb-2">Default credentials (optional)</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <input name="default_access_key_id" class="input" placeholder="${hasDefaults ? "•••••••• (leave blank to keep)" : "AKIA..."}" />
+          <input name="default_secret_access_key" type="password" class="input" placeholder="${hasDefaults ? "•••••••• (leave blank to keep)" : "Secret Access Key"}" />
+        </div>
+        <p class="text-xs text-gray-500 mt-2">These credentials can be reused when adding services. They are stored encrypted.</p>
       </div>
       <div class="flex gap-3 justify-end pt-4 border-t border-gray-100 dark:border-gray-700">
         <button type="button" id="workspace-cancel" class="btn-secondary px-6">Cancel</button>
@@ -2725,15 +3038,16 @@ function openWorkspaceModal(workspace = null) {
   el("workspace-form").onsubmit = async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
-    const awsConnectionIds = form.getAll("awsConnectionIds");
+    const defaultAccessKeyId = String(form.get("default_access_key_id") || "").trim();
+    const defaultSecretAccessKey = String(form.get("default_secret_access_key") || "").trim();
     const payload = {
       name: String(form.get("name") || "").trim(),
       description: String(form.get("description") || "").trim(),
       color: String(form.get("color") || "#f97316"),
-      default_region: String(form.get("default_region") || "us-east-1"),
-      aws_connection_ids: awsConnectionIds,
-      primary_aws_connection_id: awsConnectionIds[0] || null,
+      defaultRegion: String(form.get("default_region") || "us-east-1"),
     };
+    if (defaultAccessKeyId) payload.defaultAccessKeyId = defaultAccessKeyId;
+    if (defaultSecretAccessKey) payload.defaultSecretAccessKey = defaultSecretAccessKey;
     try {
       const id = String(form.get("id") || "").trim();
       const saved = id
@@ -2757,13 +3071,240 @@ function openWorkspaceModal(workspace = null) {
   };
 }
 
+function getWorkspaceServiceById(serviceId) {
+  const services = state.workspaceDetail?.services || {};
+  for (const key of Object.keys(services)) {
+    const found = (services[key] || []).find((row) => row.id === serviceId);
+    if (found) return { ...found, serviceType: key };
+  }
+  return null;
+}
+
+function serviceConfigFields(serviceType, config = {}) {
+  if (serviceType === "s3") {
+    return `
+      ${field("Path prefix", `<input name="cfg_prefix" class="input" value="${escapeHtml(config.prefix || "")}" placeholder="uploads/" />`)}
+      ${field("Path style", `<select name="cfg_pathStyle" class="input"><option value="false" ${(String(config.pathStyle || "false") === "false") ? "selected" : ""}>Disabled</option><option value="true" ${(String(config.pathStyle || "false") === "true") ? "selected" : ""}>Enabled</option></select>`)}
+    `;
+  }
+  if (serviceType === "sns") return field("Protocol", `<input name="cfg_protocol" class="input" value="${escapeHtml(config.protocol || "")}" placeholder="https" />`);
+  if (serviceType === "ses") return field("From Name", `<input name="cfg_fromName" class="input" value="${escapeHtml(config.fromName || "")}" placeholder="Cronix Alerts" />`);
+  if (serviceType === "cloudwatch") return field("Log Stream Prefix", `<input name="cfg_logStreamPrefix" class="input" value="${escapeHtml(config.logStreamPrefix || "")}" />`);
+  if (serviceType === "rds") {
+    return `
+      ${field("Port", `<input name="cfg_port" type="number" class="input" value="${escapeHtml(String(config.port || "3306"))}" />`)}
+      ${field("Database engine", `<select name="cfg_engine" class="input"><option value="mysql" ${String(config.engine || "mysql") === "mysql" ? "selected" : ""}>MySQL</option><option value="postgresql" ${String(config.engine || "") === "postgresql" ? "selected" : ""}>PostgreSQL</option><option value="mariadb" ${String(config.engine || "") === "mariadb" ? "selected" : ""}>MariaDB</option></select>`)}
+    `;
+  }
+  return "";
+}
+
+function collectServiceConfig(serviceType, form) {
+  if (serviceType === "s3") return { prefix: String(form.get("cfg_prefix") || "").trim(), pathStyle: String(form.get("cfg_pathStyle") || "false") === "true" };
+  if (serviceType === "sns") return { protocol: String(form.get("cfg_protocol") || "").trim() };
+  if (serviceType === "ses") return { fromName: String(form.get("cfg_fromName") || "").trim() };
+  if (serviceType === "cloudwatch") return { logStreamPrefix: String(form.get("cfg_logStreamPrefix") || "").trim() };
+  if (serviceType === "rds") return { port: Number(form.get("cfg_port") || 3306), engine: String(form.get("cfg_engine") || "mysql") };
+  return {};
+}
+
+function validateServiceIdentifier(serviceType, resourceIdentifier) {
+  if (!resourceIdentifier) return `${WORKSPACE_SERVICE_META[serviceType]?.resourceLabel || "Identifier"} is required`;
+  if (serviceType === "sns" && !/^arn:aws:sns:[^:]+:\d+:.+/.test(resourceIdentifier)) return "Topic ARN format is invalid";
+  if (serviceType === "ec2" && !/^i-[a-zA-Z0-9]+/.test(resourceIdentifier)) return "EC2 instance ID format is invalid";
+  return "";
+}
+
+function openWorkspaceServiceModal(serviceType, existingService = null) {
+  const workspace = state.workspaceDetail;
+  if (!workspace) return;
+  const modal = el("job-modal");
+  const body = el("job-modal-body");
+  const meta = WORKSPACE_SERVICE_META[serviceType] || { label: serviceType, resourceLabel: "Identifier" };
+  const regionValue = existingService?.region || workspace.defaultRegion || "us-east-1";
+  const config = existingService?.configJson || existingService?.config_json || {};
+  const hasDefaults = Boolean(workspace.hasDefaultCredentials);
+  body.innerHTML = `
+    <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${existingService ? "Edit" : "Add"} ${meta.label} to ${escapeHtml(workspace.name)}</h3>
+      <button type="button" id="ws-service-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="ws-service-form" class="space-y-5 p-6">
+      <input type="hidden" name="service_type" value="${escapeHtml(serviceType)}" />
+      ${existingService ? `<input type="hidden" name="service_id" value="${escapeHtml(existingService.id)}" />` : ""}
+      <div>
+        <div class="text-sm font-semibold mb-2">Identity</div>
+        ${field("Friendly name", `<input name="friendly_name" class="input" required value="${escapeHtml(existingService?.friendlyName || existingService?.friendly_name || "")}" placeholder="Profile photos bucket" />`)}
+      </div>
+      <div>
+        <div class="text-sm font-semibold mb-2">AWS Credentials</div>
+        <div class="flex items-center gap-4 text-sm mb-2">
+          ${hasDefaults ? `<label><input type="radio" name="credentials_mode" value="default" ${!existingService ? "checked" : ""} /> Use workspace default credentials</label>` : ""}
+          <label><input type="radio" name="credentials_mode" value="specific" ${existingService || !hasDefaults ? "checked" : ""} /> Use specific credentials</label>
+        </div>
+        ${hasDefaults ? `<p class="text-xs text-gray-500 mb-2">Will use the saved default credentials for this workspace.</p>` : ""}
+        <div id="ws-service-creds-fields" class="${hasDefaults && !existingService ? "hidden" : ""}">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input name="access_key_id" class="input" placeholder="${existingService ? "•••••••• (leave blank to keep)" : "Access Key ID"}" />
+            <input name="secret_access_key" type="password" class="input" placeholder="${existingService ? "•••••••• (leave blank to keep)" : "Secret Access Key"}" />
+          </div>
+          ${existingService ? `<p class="text-xs text-gray-500 mt-1">Leave blank to keep existing credentials.</p>` : ""}
+        </div>
+      </div>
+      <div>
+        <div class="text-sm font-semibold mb-2">Service Configuration</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          ${field("AWS Region", `<select name="region" class="input">${state.awsRegions.map((r) => `<option value="${r.id}" ${regionValue === r.id ? "selected" : ""}>${r.name} (${r.id})</option>`).join("")}</select>`)}
+          ${field(meta.resourceLabel, `<input name="resource_identifier" class="input" required value="${escapeHtml(existingService?.resourceIdentifier || existingService?.resource_identifier || "")}" />`)}
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">${serviceConfigFields(serviceType, config)}</div>
+      </div>
+      <div>
+        <div class="text-sm font-semibold mb-2">Test Connection</div>
+        <button type="button" id="ws-service-test" class="btn-secondary">Test connection</button>
+        <div id="ws-service-test-result" class="text-xs mt-2 text-gray-500">Optional but recommended.</div>
+      </div>
+      <div class="flex gap-3 justify-end pt-4 border-t border-gray-100 dark:border-gray-700">
+        <button type="button" id="ws-service-cancel" class="btn-secondary px-6">Cancel</button>
+        <button type="submit" class="btn-primary px-8">Save</button>
+      </div>
+    </form>
+  `;
+  modal.classList.remove("hidden");
+  if (window.lucide) window.lucide.createIcons();
+  const close = () => modal.classList.add("hidden");
+  el("ws-service-close").onclick = close;
+  el("ws-service-cancel").onclick = close;
+  const credsModeEls = Array.from(body.querySelectorAll("input[name='credentials_mode']"));
+  credsModeEls.forEach((node) => {
+    node.onchange = () => {
+      const mode = body.querySelector("input[name='credentials_mode']:checked")?.value || "specific";
+      el("ws-service-creds-fields").classList.toggle("hidden", mode === "default");
+    };
+  });
+
+  el("ws-service-test").onclick = async () => {
+    const resultEl = el("ws-service-test-result");
+    const form = new FormData(el("ws-service-form"));
+    const mode = form.get("credentials_mode") || "specific";
+    const accessKeyId = String(form.get("access_key_id") || "").trim();
+    const secretAccessKey = String(form.get("secret_access_key") || "").trim();
+    const payload = {
+      serviceType,
+      friendlyName: String(form.get("friendly_name") || "").trim(),
+      region: String(form.get("region") || "").trim(),
+      resourceIdentifier: String(form.get("resource_identifier") || "").trim(),
+      accessKeyId,
+      secretAccessKey,
+      configJson: collectServiceConfig(serviceType, form),
+    };
+    if (mode === "default" && workspace.hasDefaultCredentials) {
+      const fake = await uiConfirm("Use workspace default credentials for test? This will test after save.", { title: "Test with defaults", okLabel: "OK", cancelLabel: "Back", danger: false });
+      if (!fake) return;
+      resultEl.className = "text-xs mt-2 text-gray-500";
+      resultEl.textContent = "Default credentials selected. Save first, then use row Test.";
+      return;
+    }
+    resultEl.className = "text-xs mt-2 text-gray-500";
+    resultEl.textContent = "Testing...";
+    try {
+      const test = await window.OggoAPI.testWorkspaceServiceDraft(workspace.id, payload);
+      resultEl.className = `text-xs mt-2 ${test.success ? "text-green-500" : "text-red-500"}`;
+      resultEl.textContent = test.message || (test.success ? "Connection successful" : "Connection failed");
+    } catch (error) {
+      resultEl.className = "text-xs mt-2 text-red-500";
+      resultEl.textContent = error.message || "Test failed";
+    }
+  };
+
+  el("ws-service-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const mode = form.get("credentials_mode") || (workspace.hasDefaultCredentials ? "default" : "specific");
+    const resourceIdentifier = String(form.get("resource_identifier") || "").trim();
+    const validationMessage = validateServiceIdentifier(serviceType, resourceIdentifier);
+    if (validationMessage) {
+      toast(validationMessage, "error");
+      return;
+    }
+    const payload = {
+      serviceType,
+      friendlyName: String(form.get("friendly_name") || "").trim(),
+      region: String(form.get("region") || "").trim(),
+      resourceIdentifier,
+      configJson: collectServiceConfig(serviceType, form),
+    };
+    const serviceId = String(form.get("service_id") || "").trim();
+    if (mode === "specific") {
+      payload.accessKeyId = String(form.get("access_key_id") || "").trim();
+      payload.secretAccessKey = String(form.get("secret_access_key") || "").trim();
+      if (!serviceId && (!payload.accessKeyId || !payload.secretAccessKey)) {
+        toast("Access Key ID and Secret Access Key are required", "error");
+        return;
+      }
+    }
+    try {
+      let saved;
+      if (serviceId) {
+        saved = await window.OggoAPI.updateWorkspaceService(workspace.id, serviceId, payload);
+      } else {
+        saved = await window.OggoAPI.attachServiceToWorkspace(workspace.id, payload);
+      }
+      if ((mode === "default" || (!payload.accessKeyId && !payload.secretAccessKey)) && workspace.hasDefaultCredentials) {
+        await window.OggoAPI.useWorkspaceDefaultCredentials(workspace.id, saved.id);
+      }
+      await refreshData();
+      await loadWorkspaceDetail(workspace.id);
+      render();
+      bindViewEvents();
+      close();
+      toast(`Service ${serviceId ? "updated" : "attached"}`, "success");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  };
+}
+
+window.openWorkspaceServiceModal = openWorkspaceServiceModal;
+window.uiConfirm = uiConfirm;
+window.uiPrompt = uiPrompt;
+
 async function scanSoftware(manager = "") {
   const scan = await window.OggoAPI.scanPackages(state.softwareServerId, manager);
-  state.packageScan = scan;
+  if (manager && state.packageScan?.sections?.length) {
+    const incoming = Array.isArray(scan.sections) ? scan.sections : [];
+    const nextSections = [...(state.packageScan.sections || [])];
+    incoming.forEach((section) => {
+      const idx = nextSections.findIndex((s) => s.manager === section.manager);
+      if (idx >= 0) nextSections[idx] = section;
+      else nextSections.push(section);
+    });
+    state.packageScan = { ...state.packageScan, ...scan, sections: nextSections };
+  } else {
+    state.packageScan = scan;
+  }
+  state.packageStatDisplay = { ...(scan.stats || state.packageStatDisplay) };
 }
 
 async function refreshSoftwareHistory() {
-  state.packageHistory = await window.OggoAPI.packageHistory(state.softwareServerId, 150);
+  const panel = state.packageHistoryPanel || {};
+  const rows = await window.OggoAPI.packageHistoryV2(
+    state.softwareServerId,
+    panel.limit || 100,
+    panel.filter || "all",
+    panel.search || ""
+  );
+  state.packageHistory = Array.isArray(rows) ? rows : [];
+  const now = Date.now();
+  const map = {};
+  state.packageHistory.forEach((row) => {
+    if (row.status !== "success") return;
+    if (!["update", "install"].includes(String(row.action || "").toLowerCase())) return;
+    const ts = new Date(row.created_at).getTime();
+    if (!Number.isFinite(ts) || now - ts > 24 * 60 * 60 * 1000) return;
+    map[`${row.package_manager}:${row.package_name}`] = true;
+  });
+  state.packageUpdatedToday = map;
 }
 
 function changelogUrlForPackage(manager, packageName) {
@@ -2774,58 +3315,292 @@ function changelogUrlForPackage(manager, packageName) {
   return "";
 }
 
-function startPackageOperation(operation, manager, packageName, payload) {
-  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const op = { id, operation, manager, packageName, payload, status: "running", progress: 12, output: "" };
-  state.packageOps = [op, ...state.packageOps].slice(0, 20);
-  render();
-  bindViewEvents();
-  const timer = setInterval(() => {
-    const row = state.packageOps.find((item) => item.id === id);
-    if (!row || row.status !== "running") return clearInterval(timer);
-    row.progress = Math.min(85, row.progress + 8);
+function packageKey(manager, packageName) {
+  return `${manager}:${packageName}`;
+}
+
+function classifyOutputLine(line) {
+  const s = String(line || "");
+  if (/\b(error|err)\b/i.test(s)) return "error";
+  if (/\bwarn(ing)?\b/i.test(s)) return "warn";
+  if (/\b(added|updated|success|installed)\b/i.test(s)) return "success";
+  return "muted";
+}
+
+function closePackagePanels() {
+  state.packagePanel = { type: "", key: "", loading: false, data: null, manager: "", packageName: "", version: "" };
+  state.packageHistoryPanel.open = false;
+  const floating = el("pkg-update-confirm");
+  if (floating) floating.remove();
+}
+
+function animatePackageStats(targetStats = {}) {
+  const start = { ...(state.packageStatDisplay || {}) };
+  const target = {
+    totalPackages: Number(targetStats.totalPackages || 0),
+    updatesAvailable: Number(targetStats.updatesAvailable || 0),
+    vulnerabilities: Number(targetStats.vulnerabilities || 0),
+  };
+  const started = Date.now();
+  const duration = 600;
+  const tick = () => {
+    const pct = Math.min(1, (Date.now() - started) / duration);
+    state.packageStatDisplay = {
+      totalPackages: Math.round(start.totalPackages + (target.totalPackages - start.totalPackages) * pct),
+      updatesAvailable: Math.round(start.updatesAvailable + (target.updatesAvailable - start.updatesAvailable) * pct),
+      vulnerabilities: Math.round(start.vulnerabilities + (target.vulnerabilities - start.vulnerabilities) * pct),
+    };
     render();
     bindViewEvents();
-  }, 350);
-  return { id, timer };
+    if (pct < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
-function finishPackageOperation(opId, timer, result, error) {
-  clearInterval(timer);
-  const row = state.packageOps.find((item) => item.id === opId);
-  if (!row) return;
-  if (error) {
-    row.status = "failed";
-    row.progress = 100;
-    row.output = String(error?.message || error || "Operation failed");
-  } else {
-    row.status = result?.status === "success" ? "success" : "failed";
-    row.progress = 100;
-    row.output = [result?.output || "", result?.errorOutput || ""].filter(Boolean).join("\n") || (row.status === "success" ? "Done." : "Failed.");
+function queueScanTerminalLine(text, tone = "muted") {
+  const delay = 80;
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      state.packageScanTerminal.push({ text, tone, at: Date.now() });
+      state.packageScanTerminal = state.packageScanTerminal.slice(-250);
+      render();
+      bindViewEvents();
+      resolve();
+    }, delay);
+  });
+}
+
+function updateSectionFromStreaming(section) {
+  if (!section) return;
+  if (!state.packageScan) {
+    state.packageScan = {
+      serverId: state.softwareServerId,
+      serverName: "",
+      scannedAt: new Date().toISOString(),
+      detectedManagers: [],
+      stats: { totalPackages: 0, updatesAvailable: 0, vulnerabilities: 0 },
+      sections: [],
+    };
+  }
+  const nextSections = [...(state.packageScan.sections || [])];
+  const idx = nextSections.findIndex((s) => s.manager === section.manager);
+  if (idx >= 0) nextSections[idx] = section;
+  else nextSections.push(section);
+  state.packageScan.sections = nextSections;
+}
+
+async function startStreamingScan(manager = "") {
+  if (state.packageScanInProgress) return;
+  state.packageScanInProgress = true;
+  state.packageSectionScanningManager = manager || "";
+  state.packageScanTerminal = [];
+  state.packageScanProgress = { completed: 0, total: 0 };
+  if (!manager) {
+    state.packageScan = {
+      serverId: state.softwareServerId,
+      serverName: "",
+      scannedAt: new Date().toISOString(),
+      detectedManagers: [],
+      stats: { totalPackages: 0, updatesAvailable: 0, vulnerabilities: 0 },
+      sections: [],
+    };
   }
   render();
   bindViewEvents();
+
+  const source = window.OggoAPI.streamPackageScan(state.softwareServerId, manager);
+  const managerStarts = {};
+  const safeClose = () => {
+    try { source.close(); } catch (_e) {}
+  };
+
+  const fail = async (msg) => {
+    await queueScanTerminalLine(`✗ ${msg || "Scan failed"}`, "error");
+    state.packageScanInProgress = false;
+    state.packageSectionScanningManager = "";
+    safeClose();
+    render();
+    bindViewEvents();
+  };
+
+  source.addEventListener("progress", async (event) => {
+    const data = JSON.parse(event.data || "{}");
+    if (data.type === "start") {
+      managerStarts[data.manager] = true;
+      state.packageScanProgress.total = Object.keys(managerStarts).length;
+      await queueScanTerminalLine(`Scanning ${data.manager}...`, "muted");
+      return;
+    }
+    if (data.type === "package") {
+      const update = data.latest && data.latest !== data.installed
+        ? ` -> ${data.latest} (${String(data.updateType || "none").toUpperCase()})`
+        : "";
+      const tone = String(data.updateType || "").toLowerCase() === "major"
+        ? "error"
+        : String(data.updateType || "").toLowerCase() === "minor"
+          ? "warn"
+          : String(data.updateType || "").toLowerCase() === "patch"
+            ? "success"
+            : "muted";
+      await queueScanTerminalLine(`  ✓ ${data.name} ${data.installed || "-"}${update}`, tone);
+      return;
+    }
+    if (data.type === "complete") {
+      state.packageScanProgress.completed += 1;
+      updateSectionFromStreaming(data.section);
+      await queueScanTerminalLine(`✓ Done: ${data.count || 0} packages, ${data.outdated || 0} updates`, "success");
+      render();
+      bindViewEvents();
+    }
+  });
+
+  source.addEventListener("done", async (event) => {
+    const data = JSON.parse(event.data || "{}");
+    const payload = data.payload || null;
+    if (payload) {
+      if (manager && state.packageScan?.sections?.length) {
+        (payload.sections || []).forEach((section) => updateSectionFromStreaming(section));
+        state.packageScan = { ...state.packageScan, scannedAt: payload.scannedAt, stats: payload.stats };
+      } else {
+        state.packageScan = payload;
+      }
+      animatePackageStats(payload.stats || {});
+    } else {
+      animatePackageStats({
+        totalPackages: data.totalPackages || 0,
+        updatesAvailable: data.totalUpdates || 0,
+        vulnerabilities: data.totalVulns || 0,
+      });
+    }
+    state.packageScanProgress = {
+      completed: Math.max(state.packageScanProgress.completed, state.packageScanProgress.total || 0),
+      total: Math.max(state.packageScanProgress.total, state.packageScanProgress.completed || 0),
+    };
+    await queueScanTerminalLine(`Scan complete: ${data.totalPackages || 0} packages found, ${data.totalUpdates || 0} updates available`, "success");
+    state.packageScanInProgress = false;
+    state.packageSectionScanningManager = "";
+    safeClose();
+    await refreshSoftwareHistory();
+    render();
+    bindViewEvents();
+  });
+
+  source.addEventListener("error", async () => {
+    await fail("Streaming connection failed");
+  });
 }
 
-async function confirmPackageUpdate(manager, packageName, fromVersion, toVersion, updateType) {
-  const fromV = fromVersion || "?";
-  const toV = toVersion || "latest";
-  if (updateType === "PATCH") {
-    return confirm(`PATCH update\nPackage: ${packageName}\nFrom: ${fromV}\nTo: ${toV}\nRisk: Safe`);
+function buildUpdateConfirmHtml(pkg, type) {
+  const banner = pkg.pinned
+    ? `<div class="pkg-confirm-banner">This package is pinned. Updating will not affect its pinned status.</div>`
+    : "";
+  if (type === "PATCH") {
+    return `
+      ${banner}
+      <div class="pkg-confirm-title">${escapeHtml(pkg.name)}</div>
+      <div class="pkg-confirm-sub">${escapeHtml(pkg.fromVersion || "?")} -> ${escapeHtml(pkg.toVersion || "latest")}</div>
+      <div class="pkg-badge pkg-badge-patch">Safe — patch update</div>
+      <p class="pkg-confirm-copy">Patch updates fix bugs. No breaking changes expected.</p>
+      <div class="pkg-confirm-actions">
+        <button class="btn-secondary text-xs" data-pkg-confirm-cancel="1">Cancel</button>
+        <button class="btn-primary text-xs" data-pkg-confirm-ok="1">Confirm</button>
+      </div>
+    `;
   }
-  if (updateType === "MINOR") {
-    const changelog = changelogUrlForPackage(manager, packageName);
-    return confirm(`MINOR update\nPackage: ${packageName}\nFrom: ${fromV}\nTo: ${toV}\nWarning: May include new APIs.${changelog ? `\nChangelog: ${changelog}` : ""}`);
+  if (type === "MINOR") {
+    return `
+      ${banner}
+      <div class="pkg-confirm-title">${escapeHtml(pkg.name)}</div>
+      <div class="pkg-confirm-sub">${escapeHtml(pkg.fromVersion || "?")} -> ${escapeHtml(pkg.toVersion || "latest")}</div>
+      <div class="pkg-badge pkg-badge-minor">Review recommended</div>
+      <p class="pkg-confirm-copy">Minor updates add features. Existing code should work but review the changelog.</p>
+      ${pkg.changelogUrl ? `<a class="pkg-changelog-link" href="${escapeHtml(pkg.changelogUrl)}" target="_blank" rel="noreferrer">View changelog -></a>` : ""}
+      <div class="pkg-confirm-actions">
+        <button class="btn-secondary text-xs" data-pkg-confirm-cancel="1">Cancel</button>
+        <button class="btn-primary text-xs pkg-confirm-minor" data-pkg-confirm-ok="1">Confirm</button>
+      </div>
+    `;
   }
-  if (updateType === "MAJOR") {
-    const typed = prompt(`MAJOR update\nPackage: ${packageName}\nFrom: ${fromV}\nTo: ${toV}\nBreaking changes likely. Test staging first.\n\nType package name to confirm:`);
-    return typed === packageName;
+  return `
+    ${banner}
+    <div class="pkg-confirm-major-head"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Breaking changes likely</div>
+    <div class="pkg-confirm-title">${escapeHtml(pkg.name)}</div>
+    <div class="pkg-confirm-sub">${escapeHtml(pkg.fromVersion || "?")} -> ${escapeHtml(pkg.toVersion || "latest")}</div>
+    <p class="pkg-confirm-copy pkg-confirm-copy-danger">Major updates often contain breaking changes. Test on staging first.</p>
+    ${pkg.changelogUrl ? `<a class="pkg-changelog-link pkg-changelog-major" href="${escapeHtml(pkg.changelogUrl)}" target="_blank" rel="noreferrer">View changelog -></a>` : ""}
+    <input class="input mt-2" id="pkg-major-confirm-input" placeholder="Type package name to confirm" />
+    <div class="pkg-confirm-actions">
+      <button class="btn-secondary text-xs" data-pkg-confirm-cancel="1">Cancel</button>
+      <button class="btn-danger text-xs" id="pkg-major-confirm-btn" data-pkg-confirm-ok="1" disabled>Confirm</button>
+    </div>
+  `;
+}
+
+function showUpdateConfirm(pkg, type, onConfirm, anchorEl = null) {
+  const existing = el("pkg-update-confirm");
+  if (existing) existing.remove();
+  const host = document.createElement("div");
+  host.id = "pkg-update-confirm";
+  host.className = "pkg-update-confirm";
+  host.innerHTML = buildUpdateConfirmHtml(pkg, type);
+  document.body.appendChild(host);
+  const rect = anchorEl?.getBoundingClientRect?.();
+  const top = rect ? rect.bottom + window.scrollY + 6 : window.scrollY + 120;
+  const left = rect ? Math.min(rect.left + window.scrollX, window.innerWidth - 420) : Math.max((window.innerWidth - 420) / 2, 24);
+  host.style.top = `${top}px`;
+  host.style.left = `${Math.max(24, left)}px`;
+  if (window.lucide) window.lucide.createIcons();
+  const close = () => host.remove();
+  host.querySelector("[data-pkg-confirm-cancel]")?.addEventListener("click", close);
+  host.querySelector("[data-pkg-confirm-ok]")?.addEventListener("click", async () => {
+    if (type === "MAJOR") {
+      const typed = String(host.querySelector("#pkg-major-confirm-input")?.value || "");
+      if (typed !== pkg.name) return;
+    }
+    close();
+    await onConfirm();
+  });
+  if (type === "MAJOR") {
+    const input = host.querySelector("#pkg-major-confirm-input");
+    const btn = host.querySelector("#pkg-major-confirm-btn");
+    if (input && btn) {
+      input.addEventListener("input", () => {
+        btn.disabled = String(input.value || "") !== pkg.name;
+      });
+    }
   }
-  return confirm(`Update ${packageName} (${fromV} -> ${toV})?`);
+  const outside = (event) => {
+    if (!host.contains(event.target)) {
+      document.removeEventListener("mousedown", outside);
+      close();
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", outside), 0);
 }
 
 async function runPackageOperationWithProgress(manager, packageName, action, extra = {}) {
-  const op = startPackageOperation(action, manager, packageName, { manager, packageName, action, ...extra, triggeredBy: "ui" });
+  const key = packageKey(manager, packageName);
+  const op = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    manager,
+    packageName,
+    action,
+    status: "running",
+    progress: 0,
+    title: `${action === "uninstall" ? "Uninstalling" : action === "install" ? "Installing" : "Updating"} ${packageName} ${extra.fromVersion || ""}${extra.toVersion ? ` -> ${extra.toVersion}` : ""}`.trim(),
+    lines: [{ text: "Starting operation...", tone: "muted" }],
+    payload: { manager, packageName, action, ...extra, triggeredBy: "ui" },
+  };
+  state.packageRowOps[key] = op;
+  render();
+  bindViewEvents();
+  const timer = setInterval(() => {
+    const row = state.packageRowOps[key];
+    if (!row || row.status !== "running") return clearInterval(timer);
+    row.progress = Math.min(85, Number(row.progress || 0) + 6);
+    render();
+    bindViewEvents();
+  }, 350);
   try {
     const result = await window.OggoAPI.packageOperation(state.softwareServerId, {
       manager,
@@ -2834,68 +3609,178 @@ async function runPackageOperationWithProgress(manager, packageName, action, ext
       ...extra,
       triggeredBy: "ui",
     });
-    finishPackageOperation(op.id, op.timer, result, null);
+    clearInterval(timer);
+    const text = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
+    const lines = String(text || "").split(/\r?\n/).filter(Boolean);
+    for (let i = 0; i < lines.length; i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+      op.lines.push({ text: lines[i], tone: classifyOutputLine(lines[i]) });
+      op.progress = Math.min(95, op.progress + 5);
+      render();
+      bindViewEvents();
+    }
+    op.status = result?.status === "success" ? "success" : "failed";
+    op.progress = 100;
+    op.lines.push({
+      text: op.status === "success" ? "✓ Updated successfully" : "✗ Failed",
+      tone: op.status === "success" ? "success" : "error",
+    });
+    render();
+    bindViewEvents();
+    if (op.status === "success") {
+      setTimeout(() => {
+        if (state.packageRowOps[key]?.id === op.id) {
+          delete state.packageRowOps[key];
+          render();
+          bindViewEvents();
+        }
+      }, 3000);
+    }
     state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
     return result;
   } catch (error) {
-    finishPackageOperation(op.id, op.timer, null, error);
+    clearInterval(timer);
+    op.status = "failed";
+    op.progress = 100;
+    op.lines.push({ text: String(error?.message || "Operation failed"), tone: "error" });
+    render();
+    bindViewEvents();
     throw error;
   }
 }
 
-function openPackageVersionsModal(manager, packageName, installedVersion) {
-  return window.OggoAPI
-    .packageVersions(state.softwareServerId, { manager, packageName, limit: 5 })
-    .then((versions) => {
-      const modal = el("job-modal");
-      const body = el("job-modal-body");
-      const rows = Array.isArray(versions) ? versions : [];
-      body.innerHTML = `
-        <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
-          <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Versions: ${escapeHtml(packageName)}</h3>
-          <button type="button" id="pkg-versions-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
-        </div>
-        <div class="p-4 max-h-[70vh] overflow-auto">
-          <div class="text-xs text-gray-500 mb-2">Installed: ${escapeHtml(installedVersion || "-")}</div>
-          <div class="space-y-2">
-            ${
-              rows
-                .map(
-                  (row) => `<button class="w-full text-left border border-gray-200 dark:border-gray-700 rounded-lg p-3 hover:border-orange-500" data-downgrade-version="${escapeHtml(row.version)}" data-downgrade-manager="${escapeHtml(manager)}" data-downgrade-package="${escapeHtml(packageName)}">
-                    <div class="font-semibold">${escapeHtml(row.version)}</div>
-                    <div class="text-xs text-gray-500 mt-1">${row.publishedAt ? new Date(row.publishedAt).toLocaleString() : "Release date not available"}</div>
-                  </button>`
-                )
-                .join("") || '<div class="text-sm text-gray-500">No versions found for this manager.</div>'
-            }
-          </div>
-        </div>
-      `;
-      modal.classList.remove("hidden");
-      if (window.lucide) window.lucide.createIcons();
-      el("pkg-versions-close").onclick = () => modal.classList.add("hidden");
-      body.querySelectorAll("[data-downgrade-version]").forEach((btn) => {
-        btn.onclick = async () => {
-          const version = btn.dataset.downgradeVersion;
-          if (!version) return;
-          if (!confirm(`Downgrade ${packageName} to ${version}?`)) return;
-          modal.classList.add("hidden");
-          try {
-            const result = await runPackageOperationWithProgress(manager, packageName, "install", {
-              version,
-              fromVersion: installedVersion || "",
-              toVersion: version,
-            });
-            toast(result.status === "success" ? "Version reverted" : "Version revert failed", result.status === "success" ? "success" : "error");
-            await scanSoftware();
-            render();
-            bindViewEvents();
-          } catch (error) {
-            toast(error.message, "error");
-          }
-        };
-      });
+function olderVersionThan(a, b) {
+  const sa = String(a || "").split(".").map((n) => Number(n));
+  const sb = String(b || "").split(".").map((n) => Number(n));
+  for (let i = 0; i < Math.max(sa.length, sb.length); i += 1) {
+    const av = Number.isFinite(sa[i]) ? sa[i] : 0;
+    const bv = Number.isFinite(sb[i]) ? sb[i] : 0;
+    if (av < bv) return true;
+    if (av > bv) return false;
+  }
+  return false;
+}
+
+async function openPackageVersionsPanel(manager, packageName, installedVersion) {
+  state.packagePanel = {
+    type: "versions",
+    key: packageKey(manager, packageName),
+    loading: true,
+    data: [],
+    manager,
+    packageName,
+    version: installedVersion || "",
+  };
+  render();
+  bindViewEvents();
+  try {
+    const rows = await window.OggoAPI.packageVersionsV2(state.softwareServerId, manager, packageName, 10);
+    state.packagePanel.loading = false;
+    state.packagePanel.data = Array.isArray(rows) ? rows : [];
+    render();
+    bindViewEvents();
+  } catch (error) {
+    state.packagePanel.loading = false;
+    state.packagePanel.data = [];
+    state.packagePanel.error = error.message || "Failed to load versions";
+    render();
+    bindViewEvents();
+  }
+}
+
+async function openPackageCvePanel(manager, packageName, installedVersion) {
+  state.packagePanel = {
+    type: "cves",
+    key: packageKey(manager, packageName),
+    loading: true,
+    data: [],
+    manager,
+    packageName,
+    version: installedVersion || "",
+  };
+  render();
+  bindViewEvents();
+  try {
+    const rows = await window.OggoAPI.packageCVEs(state.softwareServerId, manager, packageName, installedVersion || "");
+    state.packagePanel.loading = false;
+    state.packagePanel.data = Array.isArray(rows) ? rows : [];
+    render();
+    bindViewEvents();
+  } catch (error) {
+    state.packagePanel.loading = false;
+    state.packagePanel.data = [];
+    state.packagePanel.error = error.message || "Failed to load CVE details";
+    render();
+    bindViewEvents();
+  }
+}
+
+function toRelativeDays(dateStr) {
+  const ts = new Date(dateStr || "").getTime();
+  if (!Number.isFinite(ts)) return "";
+  const diff = Date.now() - ts;
+  const days = Math.max(0, Math.round(diff / (24 * 60 * 60 * 1000)));
+  return `${days}d ago`;
+}
+
+function exportPackageHistoryCsv(rows = []) {
+  const header = ["time", "manager", "package", "action", "from", "to", "status", "output"];
+  const escape = (s) => `"${String(s || "").replaceAll('"', '""')}"`;
+  const csv = [
+    header.join(","),
+    ...rows.map((row) => [
+      escape(row.created_at),
+      escape(row.package_manager),
+      escape(row.package_name),
+      escape(row.action),
+      escape(row.from_version),
+      escape(row.to_version),
+      escape(row.status),
+      escape(row.output),
+    ].join(",")),
+  ].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `cronix-package-history-${Date.now()}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function fetchMissingPackageDescriptions() {
+  const scan = state.packageScan;
+  if (!scan?.sections?.length) return;
+  const queue = [];
+  scan.sections.forEach((section) => {
+    (section.packages || []).forEach((pkg) => {
+      const desc = String(pkg.description || "").trim();
+      if (desc && desc !== "No description available") return;
+      if (pkg.manager !== "npm") return;
+      if (state.packageDescCache[packageKey(pkg.manager, pkg.name)]) return;
+      queue.push(pkg);
     });
+  });
+  const targets = queue.slice(0, 20);
+  await Promise.all(
+    targets.map(async (pkg) => {
+      try {
+        const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg.name)}/latest`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const desc = String(data?.description || "").trim();
+        if (desc) {
+          state.packageDescCache[packageKey(pkg.manager, pkg.name)] = desc;
+        }
+      } catch (_error) {
+        // noop
+      }
+    })
+  );
+  render();
+  bindViewEvents();
 }
 
 function openJobModal(job = null) {
@@ -3524,7 +4409,7 @@ async function openS3PreviewModal(key) {
   };
   el("s3-preview-download").onclick = () => openS3Download(file.key);
   el("s3-preview-delete").onclick = async () => {
-    if (!confirm(`Delete ${file.key}?`)) return;
+    if (!(await uiConfirm(`Delete ${file.key}?`, { title: "Delete File", okLabel: "Delete", danger: true }))) return;
     await window.OggoAPI.deleteS3File(state.s3Browser.connectionId, file.key);
     modal.classList.add("hidden");
     toast("File deleted", "success");
@@ -3828,8 +4713,16 @@ function connectTerminal(serverId) {
         toast("Search addon not loaded in this browser session", "info");
         return false;
       }
-      const q = prompt("Search in terminal");
-      if (q) terminalSearchAddon.findNext(q);
+      openSimpleModal({
+        title: "Terminal Search",
+        message: "Search in terminal",
+        input: true,
+        okLabel: "Find",
+        cancelLabel: "Cancel",
+      }).then((res) => {
+        const q = res?.ok ? String(res.value || "") : "";
+        if (q) terminalSearchAddon.findNext(q);
+      });
       return false;
     }
     return true;
@@ -4071,7 +4964,7 @@ async function explainLastTerminalCommand() {
 async function openTerminalHistoryOverlay(serverId) {
   const history = await window.OggoAPI.getTerminalHistory(serverId, 1000);
   terminalHistoryOverlay = { visible: true, items: history || [], selected: 0, query: "" };
-  const query = prompt("History search (Ctrl+R):");
+  const query = await uiPrompt("History search (Ctrl+R):", { title: "Terminal History Search", okLabel: "Search", defaultValue: "" });
   if (query === null) return;
   const FuseCtor = window.Fuse;
   if (!FuseCtor) {
@@ -4442,16 +5335,37 @@ function bindGlobalEvents() {
       openGlobalSearch();
       return;
     }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && state.view === "software-package-manager" && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      if (!state.packageScanInProgress) {
+        try {
+          await startStreamingScan();
+        } catch (_error) {
+          // no-op
+        }
+      }
+      return;
+    }
     if (event.key === "Escape" && state.globalSearch.open) {
       event.preventDefault();
       closeGlobalSearch();
+      return;
+    }
+    if (event.key === "Escape") {
+      const modal = el("job-modal");
+      if (modal && !modal.classList.contains("hidden")) {
+        modal.classList.add("hidden");
+      }
+      closePackagePanels();
+      render();
+      bindViewEvents();
     }
   });
 
   const restartBtn = el("server-restart-btn");
   if (restartBtn) {
     restartBtn.onclick = async () => {
-      if (confirm("Restart the oggo-server?")) {
+      if (await uiConfirm("Restart the oggo-server?", { title: "Restart Server", okLabel: "Restart", danger: true })) {
         toast("Restarting server...", "success");
         try {
           await window.OggoAPI.restartServer();
@@ -4466,7 +5380,7 @@ function bindGlobalEvents() {
   const stopBtn = el("server-stop-btn");
   if (stopBtn) {
     stopBtn.onclick = async () => {
-      if (confirm("Stop the oggo-server? You will need to start it manually from the terminal.")) {
+      if (await uiConfirm("Stop the oggo-server? You will need to start it manually from the terminal.", { title: "Stop Server", okLabel: "Stop", danger: true })) {
         toast("Stopping server...", "success");
         try {
           await window.OggoAPI.stopServer();
@@ -4514,7 +5428,7 @@ function bindViewEvents() {
           return;
         }
         if (deleteId) {
-          if (!confirm("Delete this workspace?")) return;
+          if (!(await uiConfirm("Delete this workspace?", { title: "Delete Workspace", okLabel: "Delete", danger: true }))) return;
           await window.OggoAPI.deleteWorkspace(deleteId);
           await refreshData();
           state.view = "all-workspaces";
@@ -4540,7 +5454,7 @@ function bindViewEvents() {
           return;
         }
         if (deleteId) {
-          if (!confirm("Delete this workspace?")) return;
+          if (!(await uiConfirm("Delete this workspace?", { title: "Delete Workspace", okLabel: "Delete", danger: true }))) return;
           await window.OggoAPI.deleteWorkspace(deleteId);
           await refreshData();
           state.workspaceDetail = null;
@@ -4551,38 +5465,44 @@ function bindViewEvents() {
           return;
         }
         if (addServiceType && state.activeWorkspaceId) {
-          if (addServiceType === "s3") {
-            const options = state.s3Connections
-              .map((row, idx) => `${idx + 1}. ${row.name} (${row.bucket_name})`)
-              .join("\n");
-            const input = prompt(`Attach S3 config to workspace.\n${options}\n\nEnter config number:`);
-            const index = Number(input || 0) - 1;
-            if (index >= 0 && state.s3Connections[index]) {
-              await window.OggoAPI.attachWorkspaceService(state.activeWorkspaceId, "s3", {
-                s3_config_id: state.s3Connections[index].id,
-              });
-            }
-          } else {
-            const name = prompt(`Add ${addServiceType} entry name`);
-            if (!name) return;
-            const payload = {
-              aws_connection_id: state.awsActiveConnectionId || state.awsConnections[0]?.id || null,
-              region: state.workspaceDetail?.default_region || "us-east-1",
-            };
-            if (addServiceType === "sns") payload.topic_name = name;
-            if (addServiceType === "ses") payload.identity = name;
-            if (addServiceType === "cloudwatch") payload.name = name;
-            if (addServiceType === "rds") payload.instance_identifier = name;
-            if (addServiceType === "ec2") payload.instance_id = name;
-            if (addServiceType === "lambda") payload.function_name = name;
-            if (addServiceType === "secrets") payload.secret_name = name;
-            await window.OggoAPI.attachWorkspaceService(state.activeWorkspaceId, addServiceType, payload);
-          }
-          await refreshData();
-          await loadWorkspaceDetail(state.activeWorkspaceId);
-          toast("Service attached", "success");
+          openWorkspaceServiceModal(addServiceType);
+          return;
+        }
+        const defaultCreds = event.target.closest("[data-workspace-default-credentials]");
+        if (defaultCreds && state.workspaceDetail?.id) {
+          openWorkspaceModal(state.workspaceDetail);
+          return;
+        }
+        const testServiceId = event.target.closest("[data-workspace-service-test]")?.dataset?.workspaceServiceTest;
+        if (testServiceId && state.activeWorkspaceId) {
+          state.workspaceServiceTesting[testServiceId] = true;
           render();
           bindViewEvents();
+          const result = await window.OggoAPI.testWorkspaceService(state.activeWorkspaceId, testServiceId);
+          delete state.workspaceServiceTesting[testServiceId];
+          toast(result.success ? "Service test successful" : `Service test failed: ${result.message}`, result.success ? "success" : "error");
+          await loadWorkspaceDetail(state.activeWorkspaceId);
+          render();
+          bindViewEvents();
+          return;
+        }
+        const editServiceId = event.target.closest("[data-workspace-service-edit]")?.dataset?.workspaceServiceEdit;
+        if (editServiceId && state.activeWorkspaceId) {
+          const existing = getWorkspaceServiceById(editServiceId);
+          if (existing) openWorkspaceServiceModal(existing.serviceType, existing);
+          return;
+        }
+        const deleteServiceId = event.target.closest("[data-workspace-service-delete]")?.dataset?.workspaceServiceDelete;
+        if (deleteServiceId && state.activeWorkspaceId) {
+          const confirmed = await uiConfirm("Remove this service attachment?", { title: "Remove Service", okLabel: "Remove", danger: true });
+          if (!confirmed) return;
+          await window.OggoAPI.detachServiceFromWorkspace(state.activeWorkspaceId, deleteServiceId);
+          await refreshData();
+          await loadWorkspaceDetail(state.activeWorkspaceId);
+          toast("Service removed", "success");
+          render();
+          bindViewEvents();
+          return;
         }
       } catch (error) {
         toast(error.message, "error");
@@ -4717,7 +5637,7 @@ function bindViewEvents() {
       try {
         if (action === "edit") openServerModal(server);
         if (action === "delete") {
-          if (!confirm(`Delete server "${server?.name}"?`)) return;
+          if (!(await uiConfirm(`Delete server "${server?.name}"?`, { title: "Delete Server", okLabel: "Delete", danger: true }))) return;
           await window.OggoAPI.deleteServer(id);
           toast("Server deleted", "success");
         }
@@ -4769,82 +5689,53 @@ function bindViewEvents() {
     }
     if (scanBtn) {
       scanBtn.onclick = async () => {
+        if (state.packageScanInProgress) return;
         try {
-          scanBtn.disabled = true;
-          scanBtn.textContent = "Scanning...";
-          await scanSoftware();
+          await startStreamingScan();
           toast("Package scan completed", "success");
-          render();
-          bindViewEvents();
+          await fetchMissingPackageDescriptions();
         } catch (error) {
           toast(error.message, "error");
-        } finally {
-          scanBtn.disabled = false;
-          scanBtn.textContent = "Scan now";
         }
       };
+      scanBtn.disabled = state.packageScanInProgress;
     }
     if (historyBtn) {
       historyBtn.onclick = async () => {
         try {
+          state.packageHistoryPanel.open = true;
           await refreshSoftwareHistory();
-          const modal = el("job-modal");
-          const body = el("job-modal-body");
-          body.innerHTML = `
-            <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
-              <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Package History</h3>
-              <button type="button" id="software-history-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
-            </div>
-            <div class="p-4 max-h-[70vh] overflow-auto">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
-                    <th class="py-2 px-2">Time</th><th class="py-2 px-2">Manager</th><th class="py-2 px-2">Package</th><th class="py-2 px-2">From</th><th class="py-2 px-2">To</th><th class="py-2 px-2">Action</th><th class="py-2 px-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${
-                    state.packageHistory
-                      .map(
-                        (row) => `
-                    <tr class="border-b border-gray-100 dark:border-gray-800">
-                      <td class="py-2 px-2 text-xs">${new Date(row.created_at).toLocaleString()}</td>
-                      <td class="py-2 px-2">${escapeHtml(row.package_manager)}</td>
-                      <td class="py-2 px-2">${escapeHtml(row.package_name)}</td>
-                      <td class="py-2 px-2 text-xs">${escapeHtml(row.from_version || "-")}</td>
-                      <td class="py-2 px-2 text-xs">${escapeHtml(row.to_version || "-")}</td>
-                      <td class="py-2 px-2">${escapeHtml(row.action)}</td>
-                      <td class="py-2 px-2 ${row.status === "success" ? "text-green-500" : "text-red-500"}">${escapeHtml(row.status)}</td>
-                    </tr>
-                  `
-                      )
-                      .join("") || `<tr><td class="py-4 px-2 text-gray-500" colspan="7">No history found.</td></tr>`
-                  }
-                </tbody>
-              </table>
-            </div>
-          `;
-          modal.classList.remove("hidden");
-          if (window.lucide) window.lucide.createIcons();
-          el("software-history-close").onclick = () => modal.classList.add("hidden");
+          render();
+          bindViewEvents();
         } catch (error) {
           toast(error.message, "error");
         }
       };
     }
     el("app-content").onclick = async (event) => {
-      const retryId = event.target.closest("[data-package-retry]")?.dataset?.packageRetry;
+      const retryId = event.target.closest("[data-package-row-retry]")?.dataset?.packageRowRetry;
       if (retryId) {
-        const op = state.packageOps.find((item) => item.id === retryId);
+        const op = Object.values(state.packageRowOps || {}).find((item) => item.id === retryId);
         if (op) {
           try {
-            await runPackageOperationWithProgress(op.manager, op.packageName, op.operation, op.payload || {});
+            await runPackageOperationWithProgress(op.manager, op.packageName, op.action, op.payload || {});
             await scanSoftware();
+            await refreshSoftwareHistory();
             render();
             bindViewEvents();
           } catch (error) {
             toast(error.message, "error");
           }
+        }
+        return;
+      }
+      const copyErr = event.target.closest("[data-package-copy-error]")?.dataset?.packageCopyError;
+      if (copyErr) {
+        const op = Object.values(state.packageRowOps || {}).find((item) => item.id === copyErr);
+        if (op) {
+          const text = (op.lines || []).map((line) => line.text).join("\n");
+          await navigator.clipboard.writeText(text);
+          toast("Error copied", "success");
         }
         return;
       }
@@ -4855,15 +5746,148 @@ function bindViewEvents() {
         bindViewEvents();
         return;
       }
+      const toggleSection = event.target.closest("[data-toggle-section]")?.dataset?.toggleSection;
+      if (toggleSection) {
+        state.packageCollapsed[toggleSection] = !state.packageCollapsed[toggleSection];
+        render();
+        bindViewEvents();
+        return;
+      }
       const managerScan = event.target.closest("[data-scan-manager]")?.dataset?.scanManager;
       if (managerScan) {
+        if (state.packageScanInProgress) return;
         try {
-          await scanSoftware(managerScan);
+          await startStreamingScan(managerScan);
+          await fetchMissingPackageDescriptions();
+        } catch (error) {
+          toast(error.message, "error");
+        }
+        return;
+      }
+      const panelClose = event.target.closest("[data-package-panel-close]");
+      if (panelClose) {
+        closePackagePanels();
+        render();
+        bindViewEvents();
+        return;
+      }
+      const historyClose = event.target.closest("[data-history-close]");
+      if (historyClose) {
+        state.packageHistoryPanel.open = false;
+        render();
+        bindViewEvents();
+        return;
+      }
+      const historyFilter = event.target.closest("[data-history-filter]")?.dataset?.historyFilter;
+      if (historyFilter) {
+        state.packageHistoryPanel.filter = historyFilter;
+        await refreshSoftwareHistory();
+        render();
+        bindViewEvents();
+        return;
+      }
+      const historyExport = event.target.closest("[data-history-export]");
+      if (historyExport) {
+        exportPackageHistoryCsv(state.packageHistory || []);
+        return;
+      }
+      const selectAll = event.target.closest("[data-package-select-all]")?.dataset?.manager;
+      if (selectAll) {
+        const section = state.packageScan?.sections?.find((s) => s.manager === selectAll);
+        const visible = getFilteredPackages(section?.packages || []);
+        const checked = Boolean(event.target.checked);
+        state.packageSelected[selectAll] = state.packageSelected[selectAll] || {};
+        visible.forEach((pkg) => {
+          state.packageSelected[selectAll][pkg.name] = checked;
+        });
+        render();
+        bindViewEvents();
+        return;
+      }
+      const rowSelect = event.target.closest("[data-package-select-row]");
+      if (rowSelect) {
+        const managerKey = rowSelect.dataset.manager;
+        const packageKeyName = rowSelect.dataset.name;
+        state.packageSelected[managerKey] = state.packageSelected[managerKey] || {};
+        const checked = Boolean(rowSelect.checked);
+        if (event.shiftKey && state.packageLastSelectedByManager[managerKey]) {
+          const section = state.packageScan?.sections?.find((s) => s.manager === managerKey);
+          const visible = getFilteredPackages(section?.packages || []).map((p) => p.name);
+          const from = visible.indexOf(state.packageLastSelectedByManager[managerKey]);
+          const to = visible.indexOf(packageKeyName);
+          if (from >= 0 && to >= 0) {
+            const [a, b] = from < to ? [from, to] : [to, from];
+            visible.slice(a, b + 1).forEach((name) => {
+              state.packageSelected[managerKey][name] = checked;
+            });
+          }
+        } else {
+          if (!event.ctrlKey && !event.metaKey) state.packageSelected[managerKey] = {};
+          state.packageSelected[managerKey][packageKeyName] = checked;
+        }
+        state.packageLastSelectedByManager[managerKey] = packageKeyName;
+        render();
+        bindViewEvents();
+        return;
+      }
+      const installVersion = event.target.closest("[data-package-install-version]");
+      if (installVersion) {
+        const version = installVersion.dataset.packageInstallVersion;
+        const pkgManager = installVersion.dataset.manager;
+        const pkgName = installVersion.dataset.name;
+        const installed = installVersion.dataset.installed || "";
+        const isDowngrade = olderVersionThan(version, installed);
+        const msg = isDowngrade
+          ? `Downgrade ${pkgName} from ${installed} to ${version}? Downgrading may remove features added since ${installed}.`
+          : `Install ${pkgName}@${version}?`;
+        if (!(await uiConfirm(msg, { title: isDowngrade ? "Confirm Downgrade" : "Confirm Install", okLabel: "Confirm", danger: isDowngrade }))) return;
+        try {
+          const result = await runPackageOperationWithProgress(pkgManager, pkgName, "install", {
+            version,
+            fromVersion: installed,
+            toVersion: version,
+          });
+          toast(result.status === "success" ? (isDowngrade ? "Downgrade complete" : "Install complete") : "Operation failed", result.status === "success" ? "success" : "error");
+          closePackagePanels();
+          await scanSoftware(pkgManager);
+          await refreshSoftwareHistory();
           render();
           bindViewEvents();
         } catch (error) {
           toast(error.message, "error");
         }
+        return;
+      }
+      const fixCve = event.target.closest("[data-package-fix-cve]");
+      if (fixCve) {
+        const version = fixCve.dataset.packageFixCve;
+        const pkgManager = fixCve.dataset.manager;
+        const pkgName = fixCve.dataset.name;
+        const installed = fixCve.dataset.installed || "";
+        showUpdateConfirm(
+          {
+            manager: pkgManager,
+            name: pkgName,
+            fromVersion: installed,
+            toVersion: version,
+            pinned: false,
+            changelogUrl: changelogUrlForPackage(pkgManager, pkgName),
+          },
+          "MINOR",
+          async () => {
+            const result = await runPackageOperationWithProgress(pkgManager, pkgName, "install", {
+              version,
+              fromVersion: installed,
+              toVersion: version,
+            });
+            toast(result.status === "success" ? "Updated to CVE fix version" : "Operation failed", result.status === "success" ? "success" : "error");
+            await scanSoftware(pkgManager);
+            await refreshSoftwareHistory();
+            render();
+            bindViewEvents();
+          },
+          event.target
+        );
         return;
       }
       const actionNode = event.target.closest("[data-package-action]");
@@ -4878,47 +5902,98 @@ function bindViewEvents() {
       try {
         if (action === "bulk-update") {
           const section = state.packageScan?.sections?.find((row) => row.manager === manager);
-          const candidates = getFilteredPackages(section?.packages || []).filter((pkg) => pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion);
+          const selected = state.packageSelected[manager] || {};
+          const visible = getFilteredPackages(section?.packages || []);
+          const base = Object.keys(selected).length
+            ? visible.filter((pkg) => selected[pkg.name])
+            : visible;
+          const candidates = base.filter((pkg) => pkg.latestVersion && pkg.latestVersion !== pkg.installedVersion);
           if (!candidates.length) {
             toast("No updatable packages in current filter", "info");
             return;
           }
-          const preview = candidates
-            .slice(0, 30)
-            .map((pkg) => `${pkg.name}: ${pkg.installedVersion || "?"} -> ${pkg.latestVersion || "latest"} [${pkg.updateType || "UNKNOWN"}]`)
-            .join("\n");
-          if (!confirm(`Bulk update ${candidates.length} packages?\n\n${preview}${candidates.length > 30 ? "\n..." : ""}`)) return;
-          let ok = 0;
-          for (const pkg of candidates) {
-            const result = await runPackageOperationWithProgress(manager, pkg.name, "update", {
-              fromVersion: pkg.installedVersion || "",
-              toVersion: pkg.latestVersion || "",
-            });
-            if (result.status === "success") ok += 1;
-          }
-          toast(`Bulk update finished: ${ok}/${candidates.length} succeeded`, ok === candidates.length ? "success" : "error");
-          await scanSoftware();
-          render();
-          bindViewEvents();
+          const pinnedSkipped = candidates.filter((pkg) => pkg.pinned).length;
+          const list = candidates.filter((pkg) => !pkg.pinned);
+          const majors = list.filter((pkg) => pkg.updateType === "MAJOR");
+          const minors = list.filter((pkg) => pkg.updateType === "MINOR");
+          const patches = list.filter((pkg) => pkg.updateType === "PATCH");
+          const modal = el("job-modal");
+          const body = el("job-modal-body");
+          const rowHtml = (arr, title, cls) => arr.length ? `<div class="mb-3"><div class="text-xs ${cls} font-semibold mb-1">${title}</div>${arr.map((pkg) => `<label class="block text-xs py-1"><input type="checkbox" data-bulk-pkg="1" data-name="${escapeHtml(pkg.name)}" checked /> ${escapeHtml(pkg.name)} ${escapeHtml(pkg.installedVersion || "?")} -> ${escapeHtml(pkg.latestVersion || "latest")}</label>`).join("")}</div>` : "";
+          body.innerHTML = `
+            <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+              <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Bulk update (${list.length})</h3>
+              <button type="button" id="bulk-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div class="p-4 max-h-[70vh] overflow-auto">
+              ${pinnedSkipped ? `<div class="text-xs text-orange-400 mb-2">${pinnedSkipped} pinned packages were skipped.</div>` : ""}
+              <div class="text-xs text-gray-500 mb-3">${patches.length} safe updates, ${minors.length} minor updates, ${majors.length} breaking updates</div>
+              ${rowHtml(majors, "MAJOR", "text-red-500")}
+              ${rowHtml(minors, "MINOR", "text-orange-400")}
+              ${rowHtml(patches, "PATCH", "text-green-500")}
+              <div class="flex gap-2 mt-3">
+                <button class="btn-primary text-xs" id="bulk-all">Update all</button>
+                <button class="btn-secondary text-xs" id="bulk-safe">Update safe only (skip MAJOR)</button>
+              </div>
+            </div>`;
+          modal.classList.remove("hidden");
+          if (window.lucide) window.lucide.createIcons();
+          el("bulk-close").onclick = () => modal.classList.add("hidden");
+          const runBulk = async (safeOnly) => {
+            const checkedNames = new Set(Array.from(body.querySelectorAll("[data-bulk-pkg='1']:checked")).map((n) => n.dataset.name));
+            modal.classList.add("hidden");
+            let ok = 0;
+            let runList = list.filter((pkg) => checkedNames.has(pkg.name));
+            if (safeOnly) runList = runList.filter((pkg) => pkg.updateType !== "MAJOR");
+            for (const pkg of runList) {
+              const result = await runPackageOperationWithProgress(manager, pkg.name, "update", {
+                fromVersion: pkg.installedVersion || "",
+                toVersion: pkg.latestVersion || "",
+              });
+              if (result.status === "success") ok += 1;
+            }
+            toast(`Bulk update finished: ${ok}/${runList.length} succeeded${pinnedSkipped ? `, ${pinnedSkipped} pinned skipped` : ""}`, ok === runList.length ? "success" : "error");
+            await scanSoftware(manager);
+            await refreshSoftwareHistory();
+            render();
+            bindViewEvents();
+          };
+          el("bulk-all").onclick = () => runBulk(false);
+          el("bulk-safe").onclick = () => runBulk(true);
           return;
         }
         if (action === "update") {
-          const confirmed = await confirmPackageUpdate(manager, packageName, fromVersion, toVersion, updateType);
-          if (!confirmed) return;
-          const result = await runPackageOperationWithProgress(manager, packageName, "update", { fromVersion, toVersion });
-          state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
-          toast(result.status === "success" ? "Operation succeeded" : "Operation failed", result.status === "success" ? "success" : "error");
-          await scanSoftware();
-          render();
-          bindViewEvents();
+          showUpdateConfirm(
+            {
+              manager,
+              name: packageName,
+              fromVersion,
+              toVersion,
+              pinned: actionNode.dataset.pinned === "1",
+              changelogUrl: changelogUrlForPackage(manager, packageName),
+            },
+            updateType === "MAJOR" ? "MAJOR" : updateType === "MINOR" ? "MINOR" : "PATCH",
+            async () => {
+              const result = await runPackageOperationWithProgress(manager, packageName, "update", { fromVersion, toVersion });
+              state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
+              toast(result.status === "success" ? "Operation succeeded" : "Operation failed", result.status === "success" ? "success" : "error");
+              await scanSoftware(manager);
+              await refreshSoftwareHistory();
+              await fetchMissingPackageDescriptions();
+              render();
+              bindViewEvents();
+            },
+            actionNode
+          );
           return;
         }
         if (action === "uninstall") {
-          if (!confirm(`Uninstall ${packageName}?`)) return;
+          if (!(await uiConfirm(`Uninstall ${packageName}?`, { title: "Uninstall Package", okLabel: "Uninstall", danger: true }))) return;
           const result = await runPackageOperationWithProgress(manager, packageName, "uninstall", { fromVersion, toVersion });
           state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
           toast(result.status === "success" ? "Operation succeeded" : "Operation failed", result.status === "success" ? "success" : "error");
-          await scanSoftware();
+          await scanSoftware(manager);
+          await refreshSoftwareHistory();
           render();
           bindViewEvents();
           return;
@@ -4926,7 +6001,7 @@ function bindViewEvents() {
         if (action === "pin") {
           await window.OggoAPI.pinPackage(state.softwareServerId, { manager, packageName, version: actionNode.dataset.version || "" });
           toast("Package pinned", "success");
-          await scanSoftware();
+          await scanSoftware(manager);
           render();
           bindViewEvents();
           return;
@@ -4934,50 +6009,31 @@ function bindViewEvents() {
         if (action === "unpin") {
           await window.OggoAPI.unpinPackage(state.softwareServerId, { manager, packageName });
           toast("Package unpinned", "success");
-          await scanSoftware();
+          await scanSoftware(manager);
           render();
           bindViewEvents();
           return;
         }
         if (action === "versions") {
-          await openPackageVersionsModal(manager, packageName, installedVersion);
+          await openPackageVersionsPanel(manager, packageName, installedVersion);
           return;
         }
         if (action === "vulns") {
-          const data = await window.OggoAPI.packageVulnerabilities(state.softwareServerId, {
-            manager,
-            packageName,
-            version: actionNode.dataset.version || "",
-          });
-          const vulns = data.vulns || data.vulnerabilities || [];
-          const modal = el("job-modal");
-          const body = el("job-modal-body");
-          body.innerHTML = `
-            <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
-              <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Vulnerabilities: ${escapeHtml(packageName)}</h3>
-              <button type="button" id="software-vuln-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
-            </div>
-            <div class="p-4 max-h-[70vh] overflow-auto space-y-3">
-              ${
-                (vulns || [])
-                  .map((v) => `<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3">
-                    <div class="font-semibold text-sm">${escapeHtml(v.id || "Unknown CVE")}</div>
-                    <div class="text-[11px] text-orange-500 mt-1">Severity: ${escapeHtml(v.severity?.[0]?.type || "unknown")} ${escapeHtml(v.severity?.[0]?.score || "")}</div>
-                    <div class="text-xs text-gray-500 mt-1">${escapeHtml(v.summary || v.details || "")}</div>
-                    <div class="text-[11px] text-green-500 mt-1">Fix version: ${escapeHtml(v.affected?.[0]?.ranges?.[0]?.events?.find((e) => e.fixed)?.fixed || "n/a")}</div>
-                  </div>`)
-                  .join("") || '<div class="text-sm text-gray-500">No vulnerabilities returned by OSV.</div>'
-              }
-            </div>
-          `;
-          modal.classList.remove("hidden");
-          if (window.lucide) window.lucide.createIcons();
-          el("software-vuln-close").onclick = () => modal.classList.add("hidden");
+          await openPackageCvePanel(manager, packageName, installedVersion);
         }
       } catch (error) {
         toast(error.message, "error");
       }
     };
+    const historySearch = el("package-history-search");
+    if (historySearch) {
+      historySearch.oninput = async () => {
+        state.packageHistoryPanel.search = historySearch.value;
+        await refreshSoftwareHistory();
+        render();
+        bindViewEvents();
+      };
+    }
   }
 
   if (state.view === "software-installer") {
@@ -4992,7 +6048,7 @@ function bindViewEvents() {
       btn.onclick = async () => {
         const manager = btn.dataset.installManager;
         const packageName = btn.dataset.installCatalog;
-        if (!confirm(`Install ${packageName} via ${manager}?`)) return;
+        if (!(await uiConfirm(`Install ${packageName} via ${manager}?`, { title: "Install Package", okLabel: "Install", danger: false }))) return;
         try {
           const result = await window.OggoAPI.runInstaller(state.softwareServerId, { manager, packageName, triggeredBy: "ui" });
           state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
@@ -5027,7 +6083,7 @@ function bindViewEvents() {
       customRunBtn.onclick = async () => {
         const customCommand = String(el("installer-custom-command")?.value || "").trim();
         if (!customCommand) return;
-        if (!confirm("Run this custom install command on selected server?")) return;
+        if (!(await uiConfirm("Run this custom install command on selected server?", { title: "Run Custom Command", okLabel: "Run", danger: true }))) return;
         try {
           const result = await window.OggoAPI.runInstaller(state.softwareServerId, { customCommand, triggeredBy: "ui" });
           state.installerOutput = [result.output || "", result.errorOutput || ""].filter(Boolean).join("\n");
@@ -5066,7 +6122,7 @@ function bindViewEvents() {
       try {
         if (action === "edit") openS3Modal(conn);
         if (action === "delete") {
-          if (!confirm(`Delete S3 connection "${conn?.name}"?`)) return;
+          if (!(await uiConfirm(`Delete S3 connection "${conn?.name}"?`, { title: "Delete S3 Connection", okLabel: "Delete", danger: true }))) return;
           await window.OggoAPI.deleteS3Connection(id);
           toast("S3 connection deleted", "success");
         }
@@ -5290,7 +6346,7 @@ function bindViewEvents() {
         return;
       }
       if (keyDelete) {
-        if (!confirm(`Delete file ${keyDelete}?`)) return;
+        if (!(await uiConfirm(`Delete file ${keyDelete}?`, { title: "Delete File", okLabel: "Delete", danger: true }))) return;
         await window.OggoAPI.deleteS3File(state.s3Browser.connectionId, keyDelete);
         toast("File deleted", "success");
         await openS3Browser(state.s3Browser.connectionId, state.s3Browser.prefix || "");
@@ -5316,7 +6372,7 @@ function bindViewEvents() {
       const deleteSelected = event.target.closest("#s3-delete-selected");
       if (deleteSelected) {
         if (!state.s3Browser.selectedKeys.length) return;
-        if (!confirm(`Delete ${state.s3Browser.selectedKeys.length} selected files?`)) return;
+        if (!(await uiConfirm(`Delete ${state.s3Browser.selectedKeys.length} selected files?`, { title: "Delete Files", okLabel: "Delete", danger: true }))) return;
         for (const key of state.s3Browser.selectedKeys) {
           await window.OggoAPI.deleteS3File(state.s3Browser.connectionId, key);
         }
@@ -5369,7 +6425,7 @@ function bindViewEvents() {
       try {
         if (action === "edit") openAwsConnectionModal(conn);
         if (action === "delete") {
-          if (!confirm(`Delete AWS connection "${conn?.name}"?`)) return;
+          if (!(await uiConfirm(`Delete AWS connection "${conn?.name}"?`, { title: "Delete AWS Connection", okLabel: "Delete", danger: true }))) return;
           await window.OggoAPI.deleteAwsConnection(id);
           toast("AWS connection deleted", "success");
         }
@@ -5439,7 +6495,7 @@ function bindViewEvents() {
       const bulkBtn = el("ssl-bulk-add-btn");
       if (bulkBtn) {
         bulkBtn.onclick = async () => {
-          const raw = prompt("Paste one domain per line (optional :port supported)");
+          const raw = await uiPrompt("Paste one domain per line (optional :port supported)", { title: "Bulk Add SSL Domains", okLabel: "Add", defaultValue: "" });
           if (!raw) return;
           const lines = raw
             .split("\n")
@@ -5475,7 +6531,7 @@ function bindViewEvents() {
             toast("SSL check completed", "success");
           }
           if (deleteId) {
-            if (!confirm("Delete this SSL monitor?")) return;
+            if (!(await uiConfirm("Delete this SSL monitor?", { title: "Delete SSL Monitor", okLabel: "Delete", danger: true }))) return;
             await window.OggoAPI.deleteSslMonitor(deleteId);
             toast("SSL monitor deleted", "success");
           }
@@ -5497,7 +6553,7 @@ function bindViewEvents() {
             const result = await window.OggoAPI.dnsLookup({ domain, recordType });
             const resultNode = el("dns-lookup-result");
             if (resultNode) {
-              resultNode.textContent = JSON.stringify(result).slice(0, 240);
+              resultNode.textContent = formatDnsLookupResult(result).slice(0, 280);
               resultNode.title = JSON.stringify(result, null, 2);
             }
           } catch (error) {
@@ -5536,7 +6592,7 @@ function bindViewEvents() {
             toast("DNS check completed", "success");
           }
           if (deleteId) {
-            if (!confirm("Delete this DNS monitor?")) return;
+            if (!(await uiConfirm("Delete this DNS monitor?", { title: "Delete DNS Monitor", okLabel: "Delete", danger: true }))) return;
             await window.OggoAPI.deleteDnsMonitor(deleteId);
             toast("DNS monitor deleted", "success");
           }
@@ -5580,7 +6636,7 @@ function bindViewEvents() {
             toast("Port check completed", "success");
           }
           if (deleteId) {
-            if (!confirm("Delete this port monitor?")) return;
+            if (!(await uiConfirm("Delete this port monitor?", { title: "Delete Port Monitor", okLabel: "Delete", danger: true }))) return;
             await window.OggoAPI.deletePortMonitor(deleteId);
             toast("Port monitor deleted", "success");
           }
@@ -5618,7 +6674,7 @@ function bindViewEvents() {
         const deleteId = event.target.closest("[data-env-delete]")?.dataset?.envDelete;
         if (!deleteId) return;
         try {
-          if (!confirm("Delete this environment variable?")) return;
+          if (!(await uiConfirm("Delete this environment variable?", { title: "Delete Environment Variable", okLabel: "Delete", danger: true }))) return;
           await window.OggoAPI.deleteEnvVar(deleteId);
           toast("Variable deleted", "success");
           await rerenderDevtools();
@@ -5662,7 +6718,7 @@ function bindViewEvents() {
             toast("HTTP check completed", "success");
           }
           if (deleteId) {
-            if (!confirm("Delete this HTTP check?")) return;
+            if (!(await uiConfirm("Delete this HTTP check?", { title: "Delete HTTP Check", okLabel: "Delete", danger: true }))) return;
             await window.OggoAPI.deleteHttpCheck(deleteId);
             toast("HTTP check deleted", "success");
           }
@@ -5805,20 +6861,20 @@ function bindViewEvents() {
               const row = document.querySelector(`[data-gui-file-open="${fileName.replace(/"/g, '\\"')}"]`);
               if (row) row.click();
             } else if (action === "delete") {
-              if (!confirm(`Delete ${fileType} "${fileName}"?`)) return;
+              if (!(await uiConfirm(`Delete ${fileType} "${fileName}"?`, { title: "Delete Item", okLabel: "Delete", danger: true }))) return;
               const cmd = fileType === "directory" ? `rm -rf "${filePath}"` : `rm "${filePath}"`;
               await runCmd(cmd, true);
               toast("Deleted successfully", "success");
               await loadActiveTerminalGuiTab(true);
             } else if (action === "rename") {
-              const newName = prompt(`Rename ${fileName} to:`, fileName);
+              const newName = await uiPrompt(`Rename ${fileName} to:`, { title: "Rename", okLabel: "Rename", defaultValue: fileName });
               if (!newName || newName === fileName) return;
               const newPath = base === "/" ? `/${newName}` : `${base || "~"}/${newName}`;
               await runCmd(`mv "${filePath}" "${newPath}"`, true);
               toast("Renamed successfully", "success");
               await loadActiveTerminalGuiTab(true);
             } else if (action === "chmod") {
-              const newPerms = prompt(`Change permissions for ${fileName} (e.g. 755 or 644):`, "755");
+              const newPerms = await uiPrompt(`Change permissions for ${fileName} (e.g. 755 or 644):`, { title: "Change Permissions", okLabel: "Apply", defaultValue: "755" });
               if (!newPerms) return;
               await runCmd(`chmod ${newPerms} "${filePath}"`, true);
               toast("Permissions updated", "success");
@@ -5853,7 +6909,7 @@ function bindViewEvents() {
             return sudoRes;
           };
           if (event.target.closest("#gui-files-new-file")) {
-            const name = prompt("New file name:");
+            const name = await uiPrompt("New file name:", { title: "Create File", okLabel: "Create", defaultValue: "" });
             if (!name) return;
             const current = String(state.terminalGui.path || "~");
             const base = current.endsWith("/") ? current.slice(0, -1) : current;
@@ -5863,7 +6919,7 @@ function bindViewEvents() {
             await loadActiveTerminalGuiTab(true);
           }
           if (event.target.closest("#gui-files-new-dir")) {
-            const name = prompt("New folder name:");
+            const name = await uiPrompt("New folder name:", { title: "Create Folder", okLabel: "Create", defaultValue: "" });
             if (!name) return;
             const current = String(state.terminalGui.path || "~");
             const base = current.endsWith("/") ? current.slice(0, -1) : current;
@@ -6042,11 +7098,11 @@ function bindViewEvents() {
     const savedAdd = el("saved-command-add");
     if (savedAdd) {
       savedAdd.onclick = async () => {
-        const name = prompt("Saved command name");
+        const name = await uiPrompt("Saved command name", { title: "Save Command", okLabel: "Next", defaultValue: "" });
         if (!name) return;
-        const command = prompt("Command");
+        const command = await uiPrompt("Command", { title: "Save Command", okLabel: "Save", defaultValue: "" });
         if (!command) return;
-        const useServerScope = confirm("Save only for this server? Click Cancel for global.");
+        const useServerScope = await uiConfirm("Save only for this server? Choose Cancel for global.", { title: "Command Scope", okLabel: "Server Only", cancelLabel: "Global", danger: false });
         await window.OggoAPI.createSavedCommand({
           name,
           command,
