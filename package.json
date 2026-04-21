@@ -11,8 +11,9 @@
     "node": ">=16.0.0"
   },
   "scripts": {
+  
     "start": "node src/server.js",
-    "dev": "node src/server.js",
+    "dev": "graphify update . && node src/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -34,6 +35,17 @@
   },
   "homepage": "https://github.com/chapeee/oggo#readme",
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.821.0",
+    "@aws-sdk/client-ec2": "^3.821.0",
+    "@aws-sdk/client-lambda": "^3.821.0",
+    "@aws-sdk/client-rds": "^3.821.0",
+    "@aws-sdk/client-secrets-manager": "^3.821.0",
+    "@aws-sdk/client-s3": "^3.821.0",
+    "@aws-sdk/client-ses": "^3.821.0",
+    "@aws-sdk/client-sns": "^3.821.0",
+    "@aws-sdk/client-sts": "^3.821.0",
+    "@aws-sdk/lib-storage": "^3.821.0",
+    "@aws-sdk/s3-request-presigner": "^3.821.0",
     "adm-zip": "^0.5.16",
     "ansi-regex": "^5.0.1",
     "axios": "^1.9.0",

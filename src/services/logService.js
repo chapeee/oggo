@@ -2,7 +2,8 @@ const fs = require("fs-extra");
 const path = require("path");
 const winston = require("winston");
 const { randomUUID } = require("crypto");
-const { run, all } = require("../db/database");
+const { run, all, get } = require("../db/database");
+const { uploadFile, getConnectionById } = require("./s3Service");
 const { getLogsDir } = require("./platformService");
 
 fs.ensureDirSync(getLogsDir());
@@ -45,8 +46,64 @@ async function addLog(log, config) {
     VALUES (@id, @job_id, @job_name, @status, @output, @error, @duration, @exit_code, @created_at)
   `, record);
 
+  await uploadLogToS3IfNeeded(record, config);
+
   await pruneLogs(record.job_id, config);
   return record;
+}
+
+async function uploadLogToS3IfNeeded(record, config) {
+  try {
+    const setting = await get("SELECT * FROM job_s3_settings WHERE job_id = ?", [record.job_id]);
+    const globalS3 = config?.s3 || {};
+    const enabled = setting ? Boolean(setting.upload_enabled) : Boolean(globalS3.autoUploadJobLogs);
+    if (!enabled) return;
+
+    const condition = setting?.upload_condition || globalS3.defaultUploadCondition || "failure";
+    if (condition === "failure" && record.status !== "failed") return;
+    if (condition === "success" && record.status !== "success") return;
+
+    const connectionId = setting?.connection_id || globalS3.defaultConnectionId;
+    if (!connectionId) return;
+    const connection = await getConnectionById(connectionId);
+    if (!connection) return;
+
+    const folderPattern = globalS3.defaultLogFolderPattern || "logs/{YYYY}/{MM}/{DD}/";
+    const dt = new Date(record.created_at || Date.now());
+    const yyyy = String(dt.getFullYear());
+    const mm = String(dt.getMonth() + 1).padStart(2, "0");
+    const dd = String(dt.getDate()).padStart(2, "0");
+    const folder = folderPattern
+      .replace("{YYYY}", yyyy)
+      .replace("{MM}", mm)
+      .replace("{DD}", dd);
+
+    const pattern = setting?.file_pattern || "{job}-{timestamp}.log";
+    const fileName = pattern
+      .replace("{job}", String(record.job_name || "job").replace(/[^a-zA-Z0-9-_]/g, "_"))
+      .replace("{timestamp}", String(record.created_at || Date.now()).replace(/[:.]/g, "-"));
+    const content = [
+      `Job: ${record.job_name}`,
+      `Status: ${record.status}`,
+      `Duration(ms): ${record.duration}`,
+      `Exit code: ${record.exit_code}`,
+      "",
+      "Output:",
+      record.output || "",
+      "",
+      "Error:",
+      record.error || "",
+    ].join("\n");
+
+    await uploadFile(connectionId, {
+      key: `${folder}${fileName}`,
+      contentBase64: Buffer.from(content, "utf8").toString("base64"),
+      contentType: "text/plain",
+      storageClass: globalS3.defaultUploadStorageClass || "STANDARD",
+    });
+  } catch (_error) {
+    // Non-blocking: S3 upload failure should not break local log persistence.
+  }
 }
 
 async function pruneLogs(jobId, config) {

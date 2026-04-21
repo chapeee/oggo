@@ -1,0 +1,1309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cronix — Server Management Platform</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ac:#F97316;--acd:rgba(249,115,22,0.12);--acd2:rgba(249,115,22,0.06);
+  --bg:#09090E;--bg2:#0F0F17;--bg3:#14141E;--bg4:#1A1A26;--bg5:#20202E;
+  --b:rgba(255,255,255,0.055);--b2:rgba(255,255,255,0.1);--b3:rgba(255,255,255,0.16);
+  --t:#E8E8F0;--t2:#8888A0;--t3:#4A4A62;
+  --ok:#22C55E;--er:#EF4444;--warn:#F59E0B;--info:#3B82F6;
+  --ok-d:rgba(34,197,94,0.12);--er-d:rgba(239,68,68,0.12);--info-d:rgba(59,130,246,0.12);
+  --radius:8px;--radius-lg:12px;--radius-xl:16px;
+  --font:'Space Grotesk',sans-serif;--mono:'JetBrains Mono',monospace;
+}
+html,body{height:100%;overflow:hidden;font-family:var(--font);background:var(--bg);color:var(--t);font-size:13px}
+
+/* SCROLLBAR */
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:2px}
+
+/* APP SHELL */
+.app{display:grid;grid-template-columns:52px 200px 1fr;height:100vh;overflow:hidden}
+.app.no-panel{grid-template-columns:52px 1fr}
+
+/* ICON RAIL */
+.rail{background:var(--bg2);border-right:1px solid var(--b);display:flex;flex-direction:column;align-items:center;padding:10px 0;gap:2px;z-index:20}
+.rail-logo{width:32px;height:32px;background:var(--ac);border-radius:9px;display:flex;align-items:center;justify-content:center;margin-bottom:10px;cursor:pointer;flex-shrink:0}
+.rail-logo svg{width:17px;height:17px;stroke:#fff;fill:none;stroke-width:2.2}
+.rail-sep{width:30px;height:1px;background:var(--b2);margin:5px 0;flex-shrink:0}
+.ri{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);position:relative;transition:all .15s;flex-shrink:0}
+.ri:hover{background:var(--bg4);color:var(--t2)}
+.ri.active{background:var(--acd);color:var(--ac)}
+.ri svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8}
+.ri-dot{position:absolute;top:6px;right:6px;width:6px;height:6px;border-radius:50%;border:1.5px solid var(--bg2)}
+.ri-dot.ok{background:var(--ok)}
+.ri-dot.er{background:var(--er)}
+.ri-dot.warn{background:var(--warn)}
+.ri-tip{position:absolute;left:46px;top:50%;transform:translateY(-50%);background:var(--bg4);border:1px solid var(--b2);padding:5px 10px;border-radius:7px;font-size:11.5px;color:var(--t);white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s;z-index:100}
+.ri:hover .ri-tip{opacity:1}
+.rail-bottom{margin-top:auto;display:flex;flex-direction:column;align-items:center;gap:2px}
+
+/* CONTEXT PANEL */
+.panel{background:var(--bg2);border-right:1px solid var(--b);display:flex;flex-direction:column;overflow:hidden;transition:all .2s}
+.panel-hd{padding:14px 14px 8px;font-size:10px;color:var(--t3);letter-spacing:.1em;text-transform:uppercase;font-weight:600;flex-shrink:0}
+.panel-scroll{flex:1;overflow-y:auto;padding:0 6px 8px}
+.pni{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;color:var(--t2);border-radius:8px;position:relative;transition:all .1s;font-size:12.5px}
+.pni:hover{background:var(--bg4);color:var(--t)}
+.pni.active{background:var(--acd);color:var(--ac);font-weight:500}
+.pni svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8;flex-shrink:0}
+.pni-badge{margin-left:auto;font-size:9.5px;padding:2px 6px;border-radius:20px;font-weight:600}
+.pb-ok{background:var(--ok-d);color:var(--ok)}
+.pb-er{background:var(--er-d);color:var(--er)}
+.pb-gray{background:var(--bg5);color:var(--t3)}
+.pb-ac{background:var(--acd);color:var(--ac)}
+.p-sec{padding:10px 10px 4px;font-size:9.5px;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.ws-item{border-radius:8px;overflow:hidden;margin-bottom:2px}
+.ws-hd{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;color:var(--t2);font-size:12.5px;transition:all .1s}
+.ws-hd:hover{background:var(--bg4);color:var(--t)}
+.ws-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.ws-arrow{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2;transition:transform .2s;flex-shrink:0;margin-left:auto}
+.ws-arrow.open{transform:rotate(90deg)}
+.ws-children{padding:2px 0 2px 24px}
+.ws-child{display:flex;align-items:center;gap:6px;padding:5px 8px;cursor:pointer;color:var(--t3);border-radius:6px;font-size:11.5px;transition:all .1s}
+.ws-child:hover{background:var(--bg4);color:var(--t2)}
+.ws-child svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:1.8}
+
+/* MAIN */
+.main{display:flex;flex-direction:column;overflow:hidden;min-width:0}
+
+/* TOPBAR */
+.topbar{background:var(--bg2);border-bottom:1px solid var(--b);height:48px;padding:0 18px;display:flex;align-items:center;gap:10px;flex-shrink:0;z-index:10}
+.tb-bc{display:flex;align-items:center;gap:5px;font-size:12.5px;flex:1;min-width:0}
+.bc-seg{color:var(--t3);cursor:pointer;white-space:nowrap}
+.bc-seg:hover{color:var(--t2)}
+.bc-seg.cur{color:var(--t);font-weight:500}
+.bc-sep{color:var(--t3);font-size:14px}
+.search-btn{display:flex;align-items:center;gap:7px;background:var(--bg4);border:1px solid var(--b2);border-radius:8px;padding:5px 11px;cursor:pointer;color:var(--t3);font-size:12px;font-family:var(--font);transition:all .15s}
+.search-btn:hover{border-color:var(--b3);color:var(--t2)}
+.search-btn kbd{background:var(--bg5);border:1px solid var(--b2);border-radius:4px;padding:1px 5px;font-size:10px;font-family:var(--mono);color:var(--t3)}
+.tb-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.ib{width:30px;height:30px;border-radius:8px;border:1px solid var(--b);background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);transition:all .15s;position:relative}
+.ib:hover{background:var(--bg4);color:var(--t2);border-color:var(--b2)}
+.ib svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8}
+.notif-dot{position:absolute;top:5px;right:5px;width:5px;height:5px;border-radius:50%;background:var(--er);border:1px solid var(--bg2)}
+.btn-ac{display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:8px;font-size:12.5px;cursor:pointer;border:none;background:var(--ac);color:#fff;font-family:var(--font);font-weight:500;transition:all .15s}
+.btn-ac:hover{opacity:.9}
+.btn-ac svg{width:12px;height:12px;stroke:#fff;fill:none;stroke-width:2.5}
+
+/* CONTENT */
+.content{flex:1;overflow-y:auto;overflow-x:hidden}
+.page{display:none;padding:22px}
+.page.active{display:block}
+
+/* STAT CARDS */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.stat-card{background:var(--bg3);border:1px solid var(--b);border-radius:var(--radius-lg);padding:16px 18px;position:relative;overflow:hidden}
+.stat-card::before{content:'';position:absolute;top:0;right:0;width:60px;height:60px;opacity:.06;border-radius:0 0 0 60px}
+.stat-card.orange::before{background:var(--ac)}
+.stat-card.green::before{background:var(--ok)}
+.stat-card.red::before{background:var(--er)}
+.stat-card.blue::before{background:var(--info)}
+.stat-label{font-size:11px;color:var(--t3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;font-weight:500}
+.stat-val{font-size:28px;font-weight:700;line-height:1;font-family:var(--mono)}
+.stat-sub{font-size:11px;color:var(--t3);margin-top:5px}
+
+/* CARDS */
+.card{background:var(--bg3);border:1px solid var(--b);border-radius:var(--radius-lg);overflow:hidden}
+.card-hd{padding:12px 16px;border-bottom:1px solid var(--b);display:flex;align-items:center;justify-content:space-between;font-size:12.5px;font-weight:500}
+.card-body{padding:14px 16px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+/* CHART BARS */
+.chart-wrap{height:120px;display:flex;align-items:flex-end;gap:5px;padding:4px 0}
+.bar-g{flex:1;display:flex;flex-direction:column;gap:2px;align-items:center}
+.bar-stack{width:100%;display:flex;flex-direction:column-reverse;gap:1px;align-items:center;height:100px}
+.bar-ok{width:100%;background:rgba(34,197,94,.6);border-radius:2px 2px 0 0;min-height:2px}
+.bar-er{width:100%;background:rgba(239,68,68,.6);border-radius:2px 2px 0 0;min-height:1px}
+.bar-lbl{font-size:9px;color:var(--t3);font-family:var(--mono);margin-top:3px}
+
+/* TABLE */
+.tbl{width:100%;border-collapse:collapse}
+.tbl th{padding:8px 12px;text-align:left;font-size:10.5px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--b)}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--b);font-size:12.5px;color:var(--t2)}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr:hover td{background:var(--bg4);color:var(--t)}
+.tbl td:first-child{color:var(--t)}
+
+/* BADGES */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;font-size:10.5px;font-weight:600}
+.badge svg{width:7px;height:7px;fill:currentColor}
+.b-ok{background:var(--ok-d);color:var(--ok)}
+.b-er{background:var(--er-d);color:var(--er)}
+.b-warn{background:rgba(245,158,11,.12);color:var(--warn)}
+.b-info{background:var(--info-d);color:var(--info)}
+.b-gray{background:var(--bg5);color:var(--t3)}
+.b-ac{background:var(--acd);color:var(--ac)}
+
+/* TOGGLE */
+.toggle{width:32px;height:17px;background:var(--bg5);border-radius:20px;position:relative;cursor:pointer;transition:background .2s;border:1px solid var(--b2);flex-shrink:0}
+.toggle.on{background:var(--ac);border-color:var(--ac)}
+.toggle::after{content:'';position:absolute;width:11px;height:11px;background:#fff;border-radius:50%;top:2px;left:2px;transition:transform .2s}
+.toggle.on::after{transform:translateX(15px)}
+
+/* SERVER CARDS */
+.server-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.srv-card{background:var(--bg3);border:1px solid var(--b);border-radius:var(--radius-lg);padding:16px;position:relative;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.srv-card:hover{border-color:var(--b2)}
+.srv-card.online{border-top:2px solid var(--ok)}
+.srv-card.offline{border-top:2px solid var(--er)}
+.srv-card-hd{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+.srv-name{font-size:13.5px;font-weight:600;margin-bottom:3px}
+.srv-host{font-size:11px;color:var(--t3);font-family:var(--mono)}
+.srv-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.srv-stat{background:var(--bg4);border-radius:7px;padding:7px 9px}
+.srv-stat-lbl{font-size:9.5px;color:var(--t3);margin-bottom:2px}
+.srv-stat-val{font-size:13px;font-weight:600;font-family:var(--mono)}
+.srv-actions{display:flex;gap:5px}
+.sa{padding:5px 10px;border-radius:6px;border:1px solid var(--b2);background:transparent;color:var(--t2);font-size:11.5px;cursor:pointer;font-family:var(--font);transition:all .15s;display:flex;align-items:center;gap:5px}
+.sa:hover{background:var(--bg4);color:var(--t)}
+.sa svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2}
+.sa.primary{background:var(--acd);border-color:rgba(249,115,22,.3);color:var(--ac)}
+
+/* TERMINAL */
+.term-wrap{display:grid;grid-template-columns:220px 1fr 300px;height:calc(100vh - 48px);overflow:hidden}
+.term-servers{background:var(--bg2);border-right:1px solid var(--b);overflow-y:auto;padding:8px}
+.ts-item{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:2px;transition:all .15s}
+.ts-item:hover{background:var(--bg4)}
+.ts-item.active{background:var(--acd)}
+.ts-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.ts-name{font-size:12.5px;font-weight:500}
+.ts-host{font-size:10.5px;color:var(--t3);font-family:var(--mono)}
+.term-main{display:flex;flex-direction:column;background:#0D1117;overflow:hidden}
+.term-tabs{background:#0F131A;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;padding:0 12px;height:36px;gap:3px}
+.term-tab{display:flex;align-items:center;gap:7px;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11.5px;color:rgba(255,255,255,.4);transition:all .15s}
+.term-tab.active{background:rgba(255,255,255,.06);color:rgba(255,255,255,.85)}
+.term-tab-dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.term-tab-x{width:14px;height:14px;border-radius:3px;display:flex;align-items:center;justify-content:center;opacity:.5}
+.term-tab-x:hover{background:rgba(255,255,255,.1);opacity:1}
+.term-output{flex:1;padding:14px 16px;font-family:var(--mono);font-size:12.5px;line-height:1.75;color:#E6EDF3;overflow-y:auto}
+.t-line{display:flex;gap:0;flex-wrap:wrap;word-break:break-all}
+.t-prompt{color:#22C55E}
+.t-path{color:#58A6FF}
+.t-dollar{color:#444;margin-right:6px}
+.t-cmd{color:#E6EDF3}
+.t-out{color:#8B949E;width:100%}
+.t-err{color:#F97316;width:100%}
+.t-ok{color:#22C55E;width:100%}
+.t-sep{color:#333}
+.term-input-row{display:flex;align-items:center;padding:8px 16px 12px;border-top:1px solid rgba(255,255,255,.04)}
+.t-inp-prompt{font-family:var(--mono);font-size:12.5px;color:#22C55E;flex-shrink:0;white-space:nowrap}
+.t-inp{flex:1;background:transparent;border:none;outline:none;font-family:var(--mono);font-size:12.5px;color:#E6EDF3;caret-color:var(--ac)}
+.term-statusbar{background:#111827;border-top:1px solid rgba(255,255,255,.04);padding:4px 14px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.tsb-item{font-size:10.5px;color:rgba(255,255,255,.3);display:flex;align-items:center;gap:6px;font-family:var(--mono)}
+.tsb-dot{width:5px;height:5px;border-radius:50%;background:var(--ok)}
+.term-saved{background:var(--bg2);border-left:1px solid var(--b);display:flex;flex-direction:column;overflow:hidden}
+.saved-hd{padding:12px 14px;border-bottom:1px solid var(--b);display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.08em}
+.saved-tabs{display:flex;border-bottom:1px solid var(--b)}
+.saved-tab{flex:1;padding:8px;text-align:center;font-size:11.5px;cursor:pointer;color:var(--t3);transition:all .15s;border-bottom:2px solid transparent}
+.saved-tab.active{color:var(--ac);border-bottom-color:var(--ac)}
+.saved-list{flex:1;overflow-y:auto;padding:8px}
+.saved-item{background:var(--bg3);border:1px solid var(--b);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:all .15s}
+.saved-item:hover{border-color:var(--b2);background:var(--bg4)}
+.saved-item-name{font-size:12px;font-weight:500;margin-bottom:4px}
+.saved-item-cmd{font-size:10.5px;color:var(--t3);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.saved-item-actions{display:flex;gap:4px;margin-top:6px}
+.sia{padding:3px 8px;border-radius:5px;font-size:10.5px;cursor:pointer;border:1px solid var(--b2);background:transparent;color:var(--t3);font-family:var(--font);transition:all .15s}
+.sia:hover{background:var(--bg5);color:var(--t2)}
+.sia.run{background:var(--acd);border-color:rgba(249,115,22,.3);color:var(--ac)}
+.saved-add-btn{margin:8px;padding:8px;border-radius:8px;border:1px dashed var(--b2);background:transparent;color:var(--t3);font-size:12px;cursor:pointer;width:calc(100% - 16px);font-family:var(--font);transition:all .15s;display:flex;align-items:center;justify-content:center;gap:6px}
+.saved-add-btn:hover{border-color:var(--ac);color:var(--ac)}
+.saved-add-btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2}
+
+/* S3 BROWSER */
+.s3-wrap{display:flex;flex-direction:column;height:calc(100vh - 48px);overflow:hidden}
+.s3-toolbar{background:var(--bg3);border-bottom:1px solid var(--b);padding:10px 16px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.s3-bc{display:flex;align-items:center;gap:4px;flex:1;font-size:12.5px;background:var(--bg4);border:1px solid var(--b);border-radius:8px;padding:5px 10px}
+.s3-bc-seg{color:var(--t3);cursor:pointer}
+.s3-bc-seg:hover{color:var(--ac)}
+.s3-bc-seg.cur{color:var(--t)}
+.s3-bc-sep{color:var(--t3)}
+.s3-filter{background:var(--bg3);border-bottom:1px solid var(--b);padding:8px 16px;display:flex;align-items:center;gap:6px;flex-shrink:0}
+.fp{padding:4px 10px;border-radius:20px;font-size:11.5px;cursor:pointer;border:1px solid var(--b);background:transparent;color:var(--t3);font-family:var(--font);transition:all .12s}
+.fp:hover{color:var(--t2);border-color:var(--b2)}
+.fp.active{background:var(--acd);border-color:rgba(249,115,22,.3);color:var(--ac)}
+.s3-sort{margin-left:auto;background:var(--bg4);border:1px solid var(--b);border-radius:7px;color:var(--t2);font-size:11.5px;padding:4px 8px;outline:none;font-family:var(--font)}
+.s3-info{padding:6px 16px;font-size:11px;color:var(--t3);border-bottom:1px solid var(--b);display:flex;gap:12px;flex-shrink:0}
+.s3-content{flex:1;overflow-y:auto;padding:14px 16px}
+.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
+.fc{background:var(--bg3);border:1px solid var(--b);border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .15s;position:relative}
+.fc:hover{border-color:var(--b2)}
+.fc.sel{border-color:var(--ac);background:var(--acd2)}
+.fc-thumb{height:108px;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+.fc-thumb-img{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:700;font-family:var(--mono);opacity:.18}
+.fc-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center}
+.fc-icon svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.5}
+.fc-ext{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.6);border-radius:4px;padding:2px 6px;font-size:9px;color:#fff;font-weight:700;letter-spacing:.04em;font-family:var(--mono)}
+.fc-chk{position:absolute;top:6px;left:6px;width:17px;height:17px;border-radius:4px;border:1.5px solid var(--b2);background:var(--bg4);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .15s}
+.fc:hover .fc-chk,.fc.sel .fc-chk{opacity:1}
+.fc.sel .fc-chk{background:var(--ac);border-color:var(--ac)}
+.fc-chk svg{width:9px;height:9px;stroke:#fff;fill:none;stroke-width:2.5}
+.fc-acts{position:absolute;top:6px;right:6px;display:flex;gap:3px;opacity:0;transition:opacity .15s}
+.fc:hover .fc-acts{opacity:1}
+.fca{width:22px;height:22px;border-radius:5px;background:rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;cursor:pointer;color:#fff;transition:background .12s}
+.fca:hover{background:var(--ac)}
+.fca svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2}
+.fc-body{padding:8px 9px}
+.fc-name{font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px}
+.fc-meta{font-size:10px;color:var(--t3)}
+
+/* REDIS */
+.redis-wrap{display:grid;grid-template-columns:260px 1fr;height:calc(100vh - 48px);overflow:hidden}
+.redis-left{background:var(--bg2);border-right:1px solid var(--b);display:flex;flex-direction:column;overflow:hidden}
+.redis-toolbar{padding:10px;border-bottom:1px solid var(--b);flex-shrink:0}
+.redis-inp{width:100%;background:var(--bg4);border:1px solid var(--b2);border-radius:7px;color:var(--t);font-size:12px;padding:7px 10px;outline:none;font-family:var(--mono)}
+.redis-inp:focus{border-color:var(--ac)}
+.redis-tree{flex:1;overflow-y:auto;padding:6px}
+.rt-ns{margin-bottom:2px}
+.rt-ns-hd{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--t2);font-size:12px;transition:all .12s}
+.rt-ns-hd:hover{background:var(--bg4);color:var(--t)}
+.rt-arrow{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2;transition:transform .15s;flex-shrink:0}
+.rt-arrow.open{transform:rotate(90deg)}
+.rt-ns-name{font-family:var(--mono);font-weight:500}
+.rt-ns-count{margin-left:auto;font-size:9.5px;background:var(--bg5);border-radius:4px;padding:1px 5px;color:var(--t3)}
+.rt-children{padding-left:18px}
+.rt-key{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:6px;cursor:pointer;color:var(--t3);font-size:11px;transition:all .12s}
+.rt-key:hover{background:var(--bg4);color:var(--t2)}
+.rt-key.active{background:var(--acd);color:var(--ac)}
+.rt-type{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700;letter-spacing:.04em;font-family:var(--mono);flex-shrink:0}
+.rt-str{background:rgba(59,130,246,.15);color:#3B82F6}
+.rt-hash{background:rgba(139,92,246,.15);color:#8B5CF6}
+.rt-list{background:rgba(249,115,22,.15);color:var(--ac)}
+.rt-set{background:rgba(34,197,94,.15);color:var(--ok)}
+.rt-zset{background:rgba(20,184,166,.15);color:#14B8A6}
+.rt-stream{background:rgba(239,68,68,.15);color:var(--er)}
+.rt-key-name{font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.rt-ttl{font-size:9.5px;color:var(--t3);flex-shrink:0;font-family:var(--mono)}
+.redis-right{display:flex;flex-direction:column;overflow:hidden}
+.redis-val-hd{padding:12px 16px;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.redis-val-key{font-family:var(--mono);font-size:13px;font-weight:500;flex:1}
+.redis-val-body{flex:1;overflow-y:auto;padding:16px}
+.redis-val-edit{background:var(--bg4);border:1px solid var(--b2);border-radius:8px;padding:14px;font-family:var(--mono);font-size:12px;color:var(--t);white-space:pre;overflow-x:auto;line-height:1.7;resize:none;width:100%}
+.hash-table{width:100%;border-collapse:collapse}
+.hash-table th{padding:8px 10px;text-align:left;font-size:10px;color:var(--t3);border-bottom:1px solid var(--b);text-transform:uppercase;letter-spacing:.06em}
+.hash-table td{padding:8px 10px;border-bottom:1px solid var(--b);font-size:12px;font-family:var(--mono);color:var(--t2)}
+.hash-table tr:hover td{background:var(--bg4);color:var(--t)}
+
+/* DEV TOOLS */
+.dev-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+.monitor-card{background:var(--bg3);border:1px solid var(--b);border-radius:var(--radius-lg);padding:14px 16px}
+.mc-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.mc-title{font-size:12px;font-weight:600;color:var(--t2)}
+.mc-val{font-size:22px;font-weight:700;font-family:var(--mono)}
+.mc-sub{font-size:10.5px;color:var(--t3);margin-top:3px}
+.health-item{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)}
+.health-item:last-child{border-bottom:none}
+.hi-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.hi-url{font-size:12px;font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hi-time{font-size:11px;color:var(--t3);font-family:var(--mono)}
+.hi-badges{display:flex;gap:3px;flex-shrink:0}
+.hi-spark{display:flex;gap:2px;align-items:flex-end;height:20px}
+.hi-bar{width:4px;border-radius:1px;min-height:3px}
+
+/* SETTINGS */
+.settings-wrap{display:grid;grid-template-columns:200px 1fr;height:calc(100vh - 48px);overflow:hidden}
+.settings-nav{background:var(--bg2);border-right:1px solid var(--b);padding:14px 8px;overflow-y:auto}
+.settings-content{overflow-y:auto;padding:24px}
+.sni{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;cursor:pointer;color:var(--t2);font-size:12.5px;transition:all .12s;margin-bottom:2px}
+.sni:hover{background:var(--bg4);color:var(--t)}
+.sni.active{background:var(--acd);color:var(--ac);font-weight:500}
+.sni svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8}
+.settings-section{max-width:600px}
+.ss-title{font-size:16px;font-weight:600;margin-bottom:4px}
+.ss-sub{font-size:12px;color:var(--t3);margin-bottom:24px}
+.form-row{margin-bottom:18px}
+.form-label{font-size:11.5px;color:var(--t2);font-weight:500;margin-bottom:6px;display:block}
+.form-inp{width:100%;background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t);font-size:12.5px;padding:8px 12px;outline:none;font-family:var(--font)}
+.form-inp:focus{border-color:var(--ac)}
+.form-hint{font-size:11px;color:var(--t3);margin-top:5px}
+.color-swatches{display:flex;gap:8px;flex-wrap:wrap}
+.cs{width:28px;height:28px;border-radius:7px;cursor:pointer;border:2px solid transparent;transition:all .15s}
+.cs.active{border-color:#fff;transform:scale(1.15)}
+.form-row-inline{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--b)}
+.frl-left{flex:1}
+.frl-title{font-size:12.5px;font-weight:500}
+.frl-sub{font-size:11px;color:var(--t3);margin-top:2px}
+.save-btn{padding:9px 22px;border-radius:8px;border:none;background:var(--ac);color:#fff;font-size:12.5px;font-weight:500;cursor:pointer;font-family:var(--font)}
+.save-btn:hover{opacity:.9}
+.danger-btn{padding:9px 22px;border-radius:8px;border:1px solid rgba(239,68,68,.4);background:transparent;color:var(--er);font-size:12.5px;font-weight:500;cursor:pointer;font-family:var(--font)}
+
+/* SEARCH OVERLAY */
+.search-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:flex;align-items:flex-start;justify-content:center;padding-top:80px;opacity:0;pointer-events:none;transition:opacity .2s}
+.search-overlay.open{opacity:1;pointer-events:all}
+.search-modal{background:var(--bg3);border:1px solid var(--b2);border-radius:14px;width:580px;overflow:hidden}
+.search-inp-wrap{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--b)}
+.search-inp-wrap svg{width:15px;height:15px;stroke:var(--t3);fill:none;stroke-width:2;flex-shrink:0}
+.search-main-inp{flex:1;background:transparent;border:none;outline:none;color:var(--t);font-size:14px;font-family:var(--font)}
+.search-results{max-height:380px;overflow-y:auto;padding:8px}
+.sr-group{margin-bottom:10px}
+.sr-group-label{font-size:10px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.08em;padding:4px 10px;margin-bottom:4px}
+.sr-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;transition:all .12s}
+.sr-item:hover,.sr-item.focused{background:var(--bg4)}
+.sr-icon{width:28px;height:28px;border-radius:7px;background:var(--bg5);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sr-icon svg{width:13px;height:13px;stroke:var(--t2);fill:none;stroke-width:1.8}
+.sr-name{font-size:12.5px;font-weight:500}
+.sr-meta{font-size:11px;color:var(--t3)}
+.search-empty{padding:40px;text-align:center;color:var(--t3)}
+.search-footer{padding:10px 16px;border-top:1px solid var(--b);display:flex;gap:12px}
+.sf-hint{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--t3)}
+.sf-key{background:var(--bg4);border:1px solid var(--b2);border-radius:4px;padding:1px 6px;font-size:10px;font-family:var(--mono)}
+
+/* EMPTY STATE */
+.empty-state{text-align:center;padding:60px 20px}
+.empty-state svg{width:40px;height:40px;stroke:var(--b2);fill:none;stroke-width:1.2;margin:0 auto 14px;display:block}
+.empty-state h3{font-size:14px;font-weight:500;color:var(--t2);margin-bottom:6px}
+.empty-state p{font-size:12px;color:var(--t3)}
+
+/* MISC */
+.page-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.page-title{font-size:17px;font-weight:700}
+.page-sub{font-size:12px;color:var(--t3);margin-top:2px}
+.divider{height:1px;background:var(--b);margin:16px 0}
+.row{display:flex;align-items:center;gap:8px}
+.flex-1{flex:1}
+
+/* ACTIVITY FEED */
+.act-item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--b)}
+.act-item:last-child{border-bottom:none}
+.act-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.act-name{font-size:12.5px;font-weight:500;flex:1}
+.act-time{font-size:11px;color:var(--t3)}
+.act-dur{font-size:11px;color:var(--t3);font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<!-- SEARCH OVERLAY -->
+<div class="search-overlay" id="searchOverlay" onclick="closeSearch(event)">
+  <div class="search-modal" onclick="event.stopPropagation()">
+    <div class="search-inp-wrap">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input class="search-main-inp" id="searchInput" placeholder="Search jobs, servers, workspaces, settings..." oninput="handleSearch(this.value)" onkeydown="handleSearchKey(event)">
+      <kbd style="font-family:var(--mono);font-size:10px;color:var(--t3);background:var(--bg4);border:1px solid var(--b2);border-radius:4px;padding:2px 6px">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults">
+      <div class="sr-group">
+        <div class="sr-group-label">Quick actions</div>
+        <div class="sr-item" onclick="nav('jobs');closeSearch()"><div class="sr-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg></div><div><div class="sr-name">Add new job</div><div class="sr-meta">Create a new cron job</div></div></div>
+        <div class="sr-item" onclick="nav('servers');closeSearch()"><div class="sr-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="20" height="5" rx="1"/></svg></div><div><div class="sr-name">Add new server</div><div class="sr-meta">Configure SSH server</div></div></div>
+        <div class="sr-item" onclick="nav('terminal');closeSearch()"><div class="sr-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div><div><div class="sr-name">Open terminal</div><div class="sr-meta">SSH terminal</div></div></div>
+        <div class="sr-item" onclick="nav('settings');closeSearch()"><div class="sr-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div><div><div class="sr-name">Settings</div><div class="sr-meta">Configure cronix</div></div></div>
+      </div>
+    </div>
+    <div class="search-footer">
+      <div class="sf-hint"><span class="sf-key">↑↓</span> navigate</div>
+      <div class="sf-hint"><span class="sf-key">↵</span> select</div>
+      <div class="sf-hint"><span class="sf-key">ESC</span> close</div>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="appShell">
+
+<!-- ICON RAIL -->
+<div class="rail">
+  <div class="rail-logo" onclick="nav('dashboard')">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
+  </div>
+  <div class="ri active" id="ri-core" onclick="showPanel('core',this)">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    <div class="ri-tip">Core</div>
+  </div>
+  <div class="ri" id="ri-servers" onclick="showPanel('servers',this)">
+    <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="20" height="5" rx="1"/></svg>
+    <div class="ri-dot ok"></div>
+    <div class="ri-tip">Servers</div>
+  </div>
+  <div class="ri" id="ri-storage" onclick="showPanel('storage',this)">
+    <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+    <div class="ri-tip">Storage</div>
+  </div>
+  <div class="rail-sep"></div>
+  <div class="ri" id="ri-devtools" onclick="showPanel('devtools',this)">
+    <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+    <div class="ri-dot ok"></div>
+    <div class="ri-tip">Dev Tools</div>
+  </div>
+  <div class="ri" id="ri-aws" onclick="showPanel('aws',this)">
+    <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+    <div class="ri-dot warn"></div>
+    <div class="ri-tip">AWS</div>
+  </div>
+  <div class="ri" id="ri-redis" onclick="showPanel('redis',this)">
+    <svg viewBox="0 0 24 24"><path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><circle cx="8" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="16" cy="12" r="1" fill="currentColor"/></svg>
+    <div class="ri-tip">Redis</div>
+  </div>
+  <div class="rail-bottom">
+    <div class="rail-sep"></div>
+    <div class="ri" id="ri-settings" onclick="showPanel('settings',this)">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <div class="ri-tip">Settings</div>
+    </div>
+  </div>
+</div>
+
+<!-- CONTEXT PANEL -->
+<div class="panel" id="contextPanel">
+  <div class="panel-hd" id="panelTitle">Core</div>
+  <div class="panel-scroll" id="panelItems"></div>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="tb-bc">
+      <span class="bc-seg" id="bcRoot" onclick="nav('dashboard')">Core</span>
+      <span class="bc-sep">/</span>
+      <span class="bc-seg cur" id="bcCur">Dashboard</span>
+    </div>
+    <div class="search-btn" onclick="openSearch()">
+      <svg viewBox="0 0 24 24" style="width:13px;height:13px;stroke:var(--t3);fill:none;stroke-width:2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      Search anything...
+      <kbd>Ctrl+K</kbd>
+    </div>
+    <div class="tb-actions">
+      <div class="ib" title="Refresh" onclick="showToast('Refreshed')">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </div>
+      <div class="ib" title="Notifications">
+        <svg viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <div class="notif-dot"></div>
+      </div>
+      <button class="btn-ac" onclick="nav('jobs')">
+        <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add job
+      </button>
+    </div>
+  </div>
+
+  <!-- PAGES -->
+  <div class="content">
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-hd"><div><div class="page-title">Dashboard</div><div class="page-sub">Overview of all your cron jobs and servers</div></div></div>
+      <div class="stats-grid">
+        <div class="stat-card orange"><div class="stat-label">Total Jobs</div><div class="stat-val" style="color:var(--ac)">12</div><div class="stat-sub">3 added this week</div></div>
+        <div class="stat-card green"><div class="stat-label">Active Jobs</div><div class="stat-val" style="color:var(--ok)">9</div><div class="stat-sub">3 paused</div></div>
+        <div class="stat-card red"><div class="stat-label">Failed Today</div><div class="stat-val" style="color:var(--er)">2</div><div class="stat-sub">Last at 3:14 AM</div></div>
+        <div class="stat-card blue"><div class="stat-label">Success Rate</div><div class="stat-val" style="color:var(--info)">94%</div><div class="stat-sub">Last 7 days</div></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-hd">Last 7 Days Execution
+            <div class="row" style="gap:10px"><span class="row" style="gap:4px;font-size:11px;color:var(--ok)"><span style="width:8px;height:8px;background:var(--ok);border-radius:2px;display:inline-block;opacity:.7"></span>Success</span><span class="row" style="gap:4px;font-size:11px;color:var(--er)"><span style="width:8px;height:8px;background:var(--er);border-radius:2px;display:inline-block;opacity:.7"></span>Failed</span></div>
+          </div>
+          <div class="card-body">
+            <div class="chart-wrap" id="dashChart"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-hd">Recent Activity</div>
+          <div class="card-body" id="actFeed"></div>
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <div class="card">
+          <div class="card-hd">Quick Actions</div>
+          <div class="card-body" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+            <div class="monitor-card" style="cursor:pointer;text-align:center" onclick="nav('jobs')">
+              <div style="font-size:20px;margin-bottom:6px">⏱</div>
+              <div style="font-size:12px;font-weight:500">Add Job</div>
+              <div style="font-size:11px;color:var(--t3)">Create cron job</div>
+            </div>
+            <div class="monitor-card" style="cursor:pointer;text-align:center" onclick="nav('servers')">
+              <div style="font-size:20px;margin-bottom:6px">🖥</div>
+              <div style="font-size:12px;font-weight:500">Add Server</div>
+              <div style="font-size:11px;color:var(--t3)">SSH connection</div>
+            </div>
+            <div class="monitor-card" style="cursor:pointer;text-align:center" onclick="nav('terminal')">
+              <div style="font-size:20px;margin-bottom:6px">⌨</div>
+              <div style="font-size:12px;font-weight:500">Terminal</div>
+              <div style="font-size:11px;color:var(--t3)">SSH terminal</div>
+            </div>
+            <div class="monitor-card" style="cursor:pointer;text-align:center" onclick="nav('logs')">
+              <div style="font-size:20px;margin-bottom:6px">📋</div>
+              <div style="font-size:12px;font-weight:500">View Logs</div>
+              <div style="font-size:11px;color:var(--t3)">Execution history</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- JOBS -->
+    <div class="page" id="page-jobs">
+      <div class="page-hd">
+        <div><div class="page-title">Jobs</div><div class="page-sub">Manage all your cron jobs</div></div>
+        <div class="row" style="gap:8px">
+          <input style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t);font-size:12px;padding:7px 11px;outline:none;font-family:var(--font)" placeholder="Search jobs...">
+          <select style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t2);font-size:12px;padding:7px 10px;outline:none;font-family:var(--font)"><option>All status</option><option>Active</option><option>Disabled</option><option>Failed</option></select>
+          <button class="btn-ac"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:#fff;fill:none;stroke-width:2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add job</button>
+        </div>
+      </div>
+      <div class="card">
+        <table class="tbl">
+          <thead><tr><th>Name</th><th>Command</th><th>Schedule</th><th>Last Run</th><th>Status</th><th>Active</th><th>Actions</th></tr></thead>
+          <tbody id="jobsTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- LOGS -->
+    <div class="page" id="page-logs">
+      <div class="page-hd">
+        <div><div class="page-title">Logs</div><div class="page-sub">Job execution history</div></div>
+        <div class="row" style="gap:8px">
+          <input style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t);font-size:12px;padding:7px 11px;outline:none;font-family:var(--font)" placeholder="Search logs...">
+          <select style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t2);font-size:12px;padding:7px 10px;outline:none;font-family:var(--font)"><option>All jobs</option><option>DB Backup</option><option>Cache clear</option></select>
+          <select style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t2);font-size:12px;padding:7px 10px;outline:none;font-family:var(--font)"><option>All status</option><option>Success</option><option>Failed</option></select>
+        </div>
+      </div>
+      <div class="card">
+        <table class="tbl">
+          <thead><tr><th>Job</th><th>Status</th><th>Output</th><th>Duration</th><th>Time</th></tr></thead>
+          <tbody>
+            <tr><td>DB Backup</td><td><span class="badge b-ok"><svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>Success</span></td><td style="font-family:var(--mono);font-size:11px;color:var(--t3)">Backup created: farmland-2026-04-18.sql.gz</td><td style="font-family:var(--mono)">2.4s</td><td style="color:var(--t3)">2 min ago</td></tr>
+            <tr><td>Cache Flush</td><td><span class="badge b-er"><svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>Failed</span></td><td style="font-family:var(--mono);font-size:11px;color:var(--t3)">Connection refused: 127.0.0.1:6379</td><td style="font-family:var(--mono)">0.1s</td><td style="color:var(--t3)">18 min ago</td></tr>
+            <tr><td>Health Check</td><td><span class="badge b-ok"><svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>Success</span></td><td style="font-family:var(--mono);font-size:11px;color:var(--t3)">All endpoints responding: 200 OK</td><td style="font-family:var(--mono)">0.8s</td><td style="color:var(--t3)">1 hr ago</td></tr>
+            <tr><td>Report Gen</td><td><span class="badge b-ok"><svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>Success</span></td><td style="font-family:var(--mono);font-size:11px;color:var(--t3)">Report emailed to admin@farmland.in</td><td style="font-family:var(--mono)">4.1s</td><td style="color:var(--t3)">3 hrs ago</td></tr>
+            <tr><td>Log Cleanup</td><td><span class="badge b-ok"><svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>Success</span></td><td style="font-family:var(--mono);font-size:11px;color:var(--t3)">Deleted 234 files, freed 1.2GB</td><td style="font-family:var(--mono)">12.3s</td><td style="color:var(--t3)">6 hrs ago</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SERVERS -->
+    <div class="page" id="page-servers">
+      <div class="page-hd">
+        <div><div class="page-title">All Servers</div><div class="page-sub">Manage SSH server connections</div></div>
+        <div class="row" style="gap:8px">
+          <input style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t);font-size:12px;padding:7px 11px;outline:none;font-family:var(--font)" placeholder="Search servers...">
+          <button class="btn-ac"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:#fff;fill:none;stroke-width:2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add server</button>
+        </div>
+      </div>
+      <div class="server-grid" id="serverGrid"></div>
+    </div>
+
+    <!-- TERMINAL -->
+    <div class="page" id="page-terminal" style="padding:0">
+      <div class="term-wrap">
+        <div class="term-servers">
+          <div class="p-sec" style="padding:10px 10px 6px">Connected servers</div>
+          <div class="ts-item active" onclick="connectServer('prod')">
+            <div class="ts-dot" style="background:var(--ok)"></div>
+            <div><div class="ts-name">Production</div><div class="ts-host">ubuntu@192.168.1.1</div></div>
+          </div>
+          <div class="ts-item" onclick="connectServer('staging')">
+            <div class="ts-dot" style="background:var(--info)"></div>
+            <div><div class="ts-name">Staging</div><div class="ts-host">dev@10.0.0.5</div></div>
+          </div>
+          <div class="ts-item" onclick="connectServer('local')">
+            <div class="ts-dot" style="background:var(--warn)"></div>
+            <div><div class="ts-name">Local Dev</div><div class="ts-host">root@localhost</div></div>
+          </div>
+          <div style="margin-top:10px;padding:8px">
+            <button style="width:100%;padding:7px;border-radius:7px;border:1px dashed var(--b2);background:transparent;color:var(--t3);font-size:11.5px;cursor:pointer;font-family:var(--font)" onclick="showToast('Add server clicked')">+ Add server</button>
+          </div>
+        </div>
+        <div class="term-main">
+          <div class="term-tabs">
+            <div class="term-tab active"><div class="term-tab-dot"></div>Production<div class="term-tab-x">✕</div></div>
+            <div class="term-tab" onclick="showToast('Tab switched')">Staging<div class="term-tab-x">✕</div></div>
+            <div style="width:24px;height:24px;border-radius:5px;border:1px solid rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;cursor:pointer;color:rgba(255,255,255,.4);font-size:14px;margin-left:2px" onclick="showToast('New tab')">+</div>
+          </div>
+          <div class="term-output" id="termOutput"></div>
+          <div id="suggestBox" style="display:none;background:#111118;border:1px solid rgba(249,115,22,.3);border-radius:9px;overflow:hidden;margin:0 16px 4px;font-family:var(--mono)">
+            <div style="padding:5px 12px;border-bottom:1px solid rgba(255,255,255,.05);font-size:10px;color:var(--t3)">Suggestions — Tab to accept</div>
+          </div>
+          <div class="term-input-row">
+            <span class="t-inp-prompt">ubuntu@prod:~$&nbsp;</span>
+            <input class="t-inp" id="termInput" placeholder="type a command..." autocomplete="off" spellcheck="false" onkeydown="handleTermKey(event)" oninput="handleTermInput(this.value)">
+          </div>
+          <div class="term-statusbar">
+            <div class="tsb-item"><div class="tsb-dot"></div>ubuntu@192.168.1.1</div>
+            <div class="tsb-item">00:12:34 session</div>
+            <div class="tsb-item">18 commands</div>
+            <div class="tsb-item">14ms latency</div>
+          </div>
+        </div>
+        <div class="term-saved">
+          <div class="saved-hd">Saved Commands<span style="cursor:pointer;font-size:14px" onclick="showToast('Add command')">+</span></div>
+          <div class="saved-tabs">
+            <div class="saved-tab active">Global</div>
+            <div class="saved-tab" onclick="switchSavedTab(event)">This Server</div>
+          </div>
+          <div class="saved-list" id="savedList"></div>
+          <button class="saved-add-btn" onclick="showToast('Add saved command')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Save command</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- S3 BROWSER -->
+    <div class="page" id="page-s3">
+      <div style="margin:-22px;height:calc(100vh - 48px);display:flex;flex-direction:column">
+        <div class="s3-toolbar">
+          <button class="sa" onclick="showToast('Navigate back')"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <div class="s3-bc">
+            <span class="s3-bc-seg" onclick="showToast('Navigate to bucket')">farmlandindia</span>
+            <span class="s3-bc-sep">/</span>
+            <span class="s3-bc-seg" onclick="showToast('Navigate to folder')">onboarding-files</span>
+            <span class="s3-bc-sep">/</span>
+            <span class="s3-bc-seg cur">images</span>
+          </div>
+          <input style="background:var(--bg4);border:1px solid var(--b2);border-radius:8px;color:var(--t);font-size:12px;padding:6px 10px;outline:none;font-family:var(--font);width:180px" placeholder="Search files...">
+          <div class="row" style="gap:4px;background:var(--bg4);border:1px solid var(--b);border-radius:8px;padding:2px">
+            <div class="ib" style="border:none" onclick="showToast('Grid view')"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
+            <div class="ib" style="border:none" onclick="showToast('List view')"><svg viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></div>
+          </div>
+          <button class="sa" onclick="showToast('New folder')"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>New folder</button>
+          <button class="btn-ac" onclick="showToast('Upload')"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload</button>
+        </div>
+        <div class="s3-filter">
+          <button class="fp active" onclick="filterFiles('all',this)">All files</button>
+          <button class="fp" onclick="filterFiles('image',this)">Images</button>
+          <button class="fp" onclick="filterFiles('video',this)">Videos</button>
+          <button class="fp" onclick="filterFiles('document',this)">Documents</button>
+          <button class="fp" onclick="filterFiles('archive',this)">Archives</button>
+          <select class="s3-sort"><option>Sort: Date modified</option><option>Sort: Name</option><option>Sort: Size</option><option>Sort: Type</option></select>
+        </div>
+        <div class="s3-info">
+          <span id="s3FileCount">18 files</span>
+          <span>·</span>
+          <span>4.7 MB total</span>
+          <span>·</span>
+          <span>STANDARD storage</span>
+        </div>
+        <div class="s3-content" id="s3Grid"></div>
+      </div>
+    </div>
+
+    <!-- REDIS -->
+    <div class="page" id="page-redis" style="padding:0">
+      <div class="redis-wrap">
+        <div class="redis-left">
+          <div class="redis-toolbar">
+            <input class="redis-inp" placeholder="Search keys..." oninput="filterRedisKeys(this.value)">
+            <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">
+              <span class="rt-type rt-str" style="cursor:pointer;padding:3px 7px">STRING</span>
+              <span class="rt-type rt-hash" style="cursor:pointer;padding:3px 7px">HASH</span>
+              <span class="rt-type rt-list" style="cursor:pointer;padding:3px 7px">LIST</span>
+              <span class="rt-type rt-set" style="cursor:pointer;padding:3px 7px">SET</span>
+              <span class="rt-type rt-zset" style="cursor:pointer;padding:3px 7px">ZSET</span>
+            </div>
+          </div>
+          <div style="padding:6px 10px;font-size:10px;color:var(--t3);border-bottom:1px solid var(--b);display:flex;justify-content:space-between">
+            <span>248 keys</span>
+            <select style="background:transparent;border:none;color:var(--t3);font-size:10px;outline:none;font-family:var(--mono)"><option>db0 (248)</option><option>db1 (12)</option><option>db2 (0)</option></select>
+          </div>
+          <div class="redis-tree" id="redisTree"></div>
+        </div>
+        <div class="redis-right">
+          <div class="redis-val-hd">
+            <div class="redis-val-key">user:1001:profile</div>
+            <span class="rt-type rt-hash" style="padding:3px 8px">HASH</span>
+            <span style="font-size:11px;color:var(--warn);font-family:var(--mono)">TTL: 3421s</span>
+            <div class="row" style="gap:5px">
+              <button class="sia run" onclick="showToast('Refreshed key')">Refresh</button>
+              <button class="sia" onclick="showToast('TTL editor')">Set TTL</button>
+              <button class="sia" onclick="showToast('Delete key')" style="color:var(--er);border-color:rgba(239,68,68,.3)">Delete</button>
+            </div>
+          </div>
+          <div class="redis-val-body">
+            <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:12px;color:var(--t2)">4 fields</span>
+              <button class="sia run" onclick="showToast('Add field')">+ Add field</button>
+            </div>
+            <table class="hash-table">
+              <thead><tr><th>Field</th><th>Value</th><th>Action</th></tr></thead>
+              <tbody>
+                <tr><td>name</td><td>Rajneesh Kumar</td><td><button class="sia" onclick="showToast('Edit field')">Edit</button></td></tr>
+                <tr><td>email</td><td>raj@example.com</td><td><button class="sia" onclick="showToast('Edit field')">Edit</button></td></tr>
+                <tr><td>role</td><td>admin</td><td><button class="sia" onclick="showToast('Edit field')">Edit</button></td></tr>
+                <tr><td>created_at</td><td>2026-01-15T09:30:00Z</td><td><button class="sia" onclick="showToast('Edit field')">Edit</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DEV TOOLS -->
+    <div class="page" id="page-devtools">
+      <div class="page-hd"><div><div class="page-title">Developer Tools</div><div class="page-sub">Monitoring, security, and developer utilities</div></div></div>
+      <div class="dev-grid">
+        <div class="monitor-card"><div class="mc-hd"><div class="mc-title">SSL Monitor</div><span class="badge b-ok">All valid</span></div><div class="mc-val" style="color:var(--ok)">6</div><div class="mc-sub">domains monitored · 2 expiring in 30 days</div></div>
+        <div class="monitor-card"><div class="mc-hd"><div class="mc-title">Health Checks</div><span class="badge b-er">1 failing</span></div><div class="mc-val" style="color:var(--er)">1/8</div><div class="mc-sub">checks failing · api.farmland.in down</div></div>
+        <div class="monitor-card"><div class="mc-hd"><div class="mc-title">DNS Monitor</div><span class="badge b-ok">Stable</span></div><div class="mc-val" style="color:var(--ok)">4</div><div class="mc-sub">records monitored · no changes</div></div>
+        <div class="monitor-card"><div class="mc-hd"><div class="mc-title">Port Scanner</div><span class="badge b-warn">1 slow</span></div><div class="mc-val" style="color:var(--warn)">12</div><div class="mc-sub">services monitored · Redis slow</div></div>
+        <div class="monitor-card"><div class="mc-hd"><div class="mc-title">Env Variables</div><span class="badge b-gray">14 vars</span></div><div class="mc-val" style="color:var(--info)">14</div><div class="mc-sub">variables stored · 3 scopes</div></div>
+        <div class="monitor-card"><div class="mc-hd"><div class="mc-title">HTTP Checks</div><span class="badge b-ok">All up</span></div><div class="mc-val" style="color:var(--ok)">8/8</div><div class="mc-sub">endpoints up · avg 124ms</div></div>
+      </div>
+      <div class="card">
+        <div class="card-hd">HTTP Health Checks — Live Status</div>
+        <div class="card-body" id="healthChecks"></div>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="page" id="page-settings" style="padding:0">
+      <div class="settings-wrap">
+        <div class="settings-nav">
+          <div class="p-sec">Preferences</div>
+          <div class="sni active" onclick="switchSettings(this,'appearance')"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>Appearance</div>
+          <div class="sni" onclick="switchSettings(this,'general')"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>General</div>
+          <div class="p-sec">Integrations</div>
+          <div class="sni" onclick="switchSettings(this,'notifications')"><svg viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</div>
+          <div class="sni" onclick="switchSettings(this,'s3')"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>S3 Storage</div>
+          <div class="p-sec">System</div>
+          <div class="sni" onclick="switchSettings(this,'security')"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Security</div>
+          <div class="sni" onclick="switchSettings(this,'danger')"><svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Danger zone</div>
+        </div>
+        <div class="settings-content" id="settingsContent">
+          <div class="settings-section">
+            <div class="ss-title">Appearance</div>
+            <div class="ss-sub">Customize how Cronix looks</div>
+            <div class="form-row">
+              <label class="form-label">Accent color</label>
+              <div class="color-swatches" id="colorSwatches"></div>
+              <div class="form-hint">This color is applied across the entire interface</div>
+            </div>
+            <div class="form-row">
+              <div class="form-row-inline">
+                <div class="frl-left"><div class="frl-title">Compact sidebar</div><div class="frl-sub">Show icon-only rail when context panel is closed</div></div>
+                <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+              </div>
+              <div class="form-row-inline">
+                <div class="frl-left"><div class="frl-title">Monospace commands</div><div class="frl-sub">Show job commands in monospace font</div></div>
+                <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+              </div>
+              <div class="form-row-inline">
+                <div class="frl-left"><div class="frl-title">Animated status badges</div><div class="frl-sub">Pulse animation on running job badges</div></div>
+                <div class="toggle" onclick="this.classList.toggle('on')"></div>
+              </div>
+            </div>
+            <button class="save-btn" onclick="showToast('Settings saved')">Save changes</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AWS -->
+    <div class="page" id="page-aws">
+      <div class="page-hd"><div><div class="page-title">AWS Workspaces</div><div class="page-sub">Group AWS services by project or client</div></div><button class="btn-ac" onclick="showToast('New workspace')"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:#fff;fill:none;stroke-width:2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New workspace</button></div>
+      <div class="server-grid">
+        <div class="srv-card" style="border-top:2px solid #F97316" onclick="showToast('Open Farmland India workspace')">
+          <div class="srv-card-hd">
+            <div><div class="srv-name">Farmland India</div><div class="srv-host">ap-south-1 · AWS</div></div>
+            <span class="badge b-ok">Healthy</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--t3);margin-bottom:12px">Production infrastructure for farmland marketplace platform</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+            <span class="badge b-gray">3 S3</span><span class="badge b-gray">1 RDS</span><span class="badge b-gray">2 EC2</span><span class="badge b-gray">4 Lambda</span>
+          </div>
+          <div class="srv-actions">
+            <button class="sa primary" onclick="showToast('Open workspace')"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Open</button>
+            <button class="sa" onclick="showToast('Edit workspace')">Edit</button>
+            <button class="sa" onclick="showToast('Delete workspace')" style="color:var(--er)">Delete</button>
+          </div>
+        </div>
+        <div class="srv-card" style="border-top:2px solid #6366F1" onclick="showToast('Open Personal workspace')">
+          <div class="srv-card-hd">
+            <div><div class="srv-name">Personal Projects</div><div class="srv-host">us-east-1 · AWS</div></div>
+            <span class="badge b-warn">1 issue</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--t3);margin-bottom:12px">Side projects and personal development environment</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+            <span class="badge b-gray">1 S3</span><span class="badge b-gray">2 Lambda</span><span class="badge b-gray">1 SNS</span>
+          </div>
+          <div class="srv-actions">
+            <button class="sa primary" onclick="showToast('Open workspace')"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Open</button>
+            <button class="sa" onclick="showToast('Edit workspace')">Edit</button>
+            <button class="sa" onclick="showToast('Delete workspace')" style="color:var(--er)">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" style="position:fixed;bottom:20px;right:20px;background:var(--bg4);border:1px solid var(--b2);border-radius:10px;padding:10px 16px;font-size:12.5px;color:var(--t);z-index:9999;opacity:0;transform:translateY(10px);transition:all .25s;pointer-events:none"></div>
+
+<script>
+const PANELS = {
+  core:{title:'Core',items:[
+    {label:'Dashboard',icon:'grid',page:'dashboard'},
+    {label:'Jobs',icon:'clock',page:'jobs',badge:'12',bc:'gray'},
+    {label:'Logs',icon:'file',page:'logs'},
+  ]},
+  servers:{title:'Servers',items:[
+    {label:'All servers',icon:'server',page:'servers',badge:'3 online',bc:'ok'},
+    {label:'SSH terminal',icon:'terminal',page:'terminal'},
+    {label:'All clients',icon:'users',page:'servers',badge:'2',bc:'gray'},
+  ]},
+  storage:{title:'Storage',items:[
+    {label:'S3 buckets',icon:'database',page:'s3',badge:'4',bc:'gray'},
+    {label:'S3 file browser',icon:'folder',page:'s3'},
+    {label:'Add bucket',icon:'plus',page:'s3'},
+  ]},
+  devtools:{title:'Dev Tools',items:[
+    {label:'Health checks',icon:'activity',page:'devtools',badge:'1 fail',bc:'er'},
+    {label:'SSL monitor',icon:'lock',page:'devtools'},
+    {label:'DNS monitor',icon:'globe',page:'devtools'},
+    {label:'Port scanner',icon:'wifi',page:'devtools'},
+    {label:'Env variables',icon:'key',page:'devtools',badge:'14',bc:'gray'},
+    {label:'HTTP checks',icon:'zap',page:'devtools'},
+  ]},
+  aws:{title:'AWS Services',items:[
+    {label:'All workspaces',icon:'box',page:'aws'},
+    {label:'AWS connections',icon:'link',page:'aws',badge:'2',bc:'gray'},
+    {label:'S3 browser',icon:'folder',page:'s3'},
+    {label:'CloudWatch',icon:'bar-chart',page:'aws'},
+    {label:'RDS databases',icon:'database',page:'aws'},
+    {label:'EC2 instances',icon:'monitor',page:'aws'},
+    {label:'Lambda',icon:'code',page:'aws'},
+    {label:'Secrets manager',icon:'shield',page:'aws'},
+  ]},
+  redis:{title:'Redis',items:[
+    {label:'All connections',icon:'database',page:'redis',badge:'2',bc:'ok'},
+    {label:'Key browser',icon:'search',page:'redis'},
+    {label:'CLI',icon:'terminal',page:'redis'},
+    {label:'Server stats',icon:'activity',page:'redis'},
+  ]},
+  settings:{title:'Settings',items:[
+    {label:'Appearance',icon:'sun',page:'settings'},
+    {label:'General',icon:'sliders',page:'settings'},
+    {label:'Notifications',icon:'bell',page:'settings'},
+    {label:'S3 storage',icon:'database',page:'settings'},
+    {label:'Security',icon:'lock',page:'settings'},
+    {label:'Danger zone',icon:'alert',page:'settings'},
+  ]},
+};
+const ICONS = {
+  grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>',
+  file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+  server:'<rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="20" height="5" rx="1"/>',
+  terminal:'<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+  users:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  database:'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+  folder:'<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  plus:'<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  activity:'<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  lock:'<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  globe:'<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+  wifi:'<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
+  key:'<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>',
+  zap:'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+  box:'<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>',
+  link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  'bar-chart':'<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+  monitor:'<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+  code:'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  sun:'<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>',
+  sliders:'<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>',
+  bell:'<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+  alert:'<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+};
+
+let currentPanel='core';
+let currentPage='dashboard';
+let selectedFiles=new Set();
+
+function svgI(n){return`<svg viewBox="0 0 24 24" style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8;flex-shrink:0">${ICONS[n]||ICONS.grid}</svg>`}
+
+function showPanel(id,el){
+  if(currentPanel===id){
+    document.querySelectorAll('.ri').forEach(r=>r.classList.remove('active'));
+    return;
+  }
+  currentPanel=id;
+  document.querySelectorAll('.ri').forEach(r=>r.classList.remove('active'));
+  el.classList.add('active');
+  const p=PANELS[id];
+  document.getElementById('panelTitle').textContent=p.title;
+  const items=document.getElementById('panelItems');
+  items.innerHTML='';
+  if(id==='aws'){
+    const wses=[{n:'Farmland India',c:'#F97316'},{n:'Personal Projects',c:'#6366F1'}];
+    wses.forEach(w=>{
+      const d=document.createElement('div');
+      d.className='ws-item';
+      d.innerHTML=`<div class="ws-hd" onclick="toggleWs(this)"><div class="ws-dot" style="background:${w.c}"></div><span style="font-size:12.5px">${w.n}</span><svg class="ws-arrow" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg></div><div class="ws-children" style="display:none"><div class="ws-child" onclick="nav('s3')">${svgI('database')} S3 (3 buckets)</div><div class="ws-child" onclick="nav('aws')">${svgI('monitor')} EC2 (2)</div><div class="ws-child" onclick="nav('aws')">${svgI('code')} Lambda (4)</div></div>`;
+      items.appendChild(d);
+    });
+    const div=document.createElement('div');
+    div.innerHTML='<div class="p-sec">All Services</div>';
+    items.appendChild(div);
+  }
+  p.items.forEach((item,i)=>{
+    const d=document.createElement('div');
+    d.className='pni'+(i===0?' active':'');
+    const badge=item.badge?`<span class="pni-badge pb-${item.bc||'gray'}">${item.badge}</span>`:'';
+    d.innerHTML=`${svgI(item.icon)}${item.label}${badge}`;
+    d.onclick=()=>{items.querySelectorAll('.pni').forEach(x=>x.classList.remove('active'));d.classList.add('active');nav(item.page);document.getElementById('bcRoot').textContent=p.title;document.getElementById('bcCur').textContent=item.label;};
+    items.appendChild(d);
+  });
+}
+
+function toggleWs(el){
+  const ch=el.nextElementSibling;
+  const arr=el.querySelector('.ws-arrow');
+  const open=ch.style.display!=='none';
+  ch.style.display=open?'none':'block';
+  arr.classList.toggle('open',!open);
+}
+
+function nav(page){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  const el=document.getElementById('page-'+page);
+  if(el)el.classList.add('active');
+  currentPage=page;
+  const names={dashboard:'Dashboard',jobs:'Jobs',logs:'Logs',servers:'All Servers',terminal:'SSH Terminal',s3:'S3 File Browser',redis:'Redis Manager',devtools:'Developer Tools',settings:'Settings',aws:'AWS Workspaces'};
+  document.getElementById('bcCur').textContent=names[page]||page;
+}
+
+// CHART
+function buildChart(){
+  const el=document.getElementById('dashChart');
+  const days=['Apr 12','13','14','15','16','17','18'];
+  const data=[{ok:45,er:2},{ok:52,er:0},{ok:38,er:5},{ok:61,er:1},{ok:49,er:3},{ok:55,er:0},{ok:43,er:2}];
+  const max=Math.max(...data.map(d=>d.ok+d.er));
+  el.innerHTML=data.map((d,i)=>{
+    const oh=Math.max(4,(d.ok/max)*90);
+    const eh=Math.max(2,(d.er/max)*90);
+    return`<div class="bar-g"><div class="bar-stack"><div class="bar-ok" style="height:${oh}px"></div><div class="bar-er" style="height:${eh}px"></div></div><div class="bar-lbl">${days[i]}</div></div>`;
+  }).join('');
+}
+
+// ACTIVITY
+function buildActivity(){
+  const acts=[
+    {name:'DB Backup',status:'ok',dur:'2.4s',time:'2m ago'},
+    {name:'Cache Flush',status:'er',dur:'0.1s',time:'18m ago'},
+    {name:'Health Check',status:'ok',dur:'0.8s',time:'1h ago'},
+    {name:'Report Gen',status:'ok',dur:'4.1s',time:'3h ago'},
+    {name:'Log Cleanup',status:'ok',dur:'12.3s',time:'6h ago'},
+  ];
+  const el=document.getElementById('actFeed');
+  el.innerHTML=acts.map(a=>`<div class="act-item"><div class="act-dot" style="background:var(--${a.status==='ok'?'ok':'er'})"></div><div class="act-name">${a.name}</div><div class="act-dur">${a.dur}</div><div class="act-time">${a.time}</div></div>`).join('');
+}
+
+// JOBS TABLE
+function buildJobs(){
+  const jobs=[
+    {name:'DB Backup',cmd:'node /scripts/backup.js',sch:'0 0 * * *',human:'Daily at midnight',last:'2 min ago',status:'ok',on:true},
+    {name:'Cache Flush',cmd:'redis-cli FLUSHDB',sch:'*/30 * * * *',human:'Every 30 min',last:'18 min ago',status:'er',on:true},
+    {name:'Health Check',cmd:'node /scripts/health.js',sch:'*/5 * * * *',human:'Every 5 min',last:'1 min ago',status:'ok',on:true},
+    {name:'Report Gen',cmd:'python /scripts/report.py',sch:'0 8 * * 1',human:'Mon at 8 AM',last:'3 hrs ago',status:'ok',on:true},
+    {name:'Log Cleanup',cmd:'find /logs -mtime +30 -delete',sch:'0 2 * * 0',human:'Sun at 2 AM',last:'6 hrs ago',status:'ok',on:false},
+    {name:'SSL Check',cmd:'certbot renew',sch:'0 0 * * *',human:'Daily at midnight',last:'12 hrs ago',status:'ok',on:true},
+  ];
+  const el=document.getElementById('jobsTable');
+  el.innerHTML=jobs.map(j=>`<tr>
+    <td><span style="font-weight:500">${j.name}</span></td>
+    <td><span style="font-family:var(--mono);font-size:11px;color:var(--t3)">${j.cmd}</span></td>
+    <td><div><span style="font-family:var(--mono);font-size:11px;color:var(--ac)">${j.sch}</span><div style="font-size:10.5px;color:var(--t3)">${j.human}</div></div></td>
+    <td style="color:var(--t3)">${j.last}</td>
+    <td><span class="badge b-${j.status==='ok'?'ok':'er'}"><svg viewBox="0 0 8 8" style="width:7px;height:7px;fill:currentColor"><circle cx="4" cy="4" r="4"/></svg>${j.status==='ok'?'Success':'Failed'}</span></td>
+    <td><div class="toggle ${j.on?'on':''}" onclick="this.classList.toggle('on');showToast('Job '+(this.classList.contains('on')?'enabled':'disabled'))"></div></td>
+    <td><div class="row" style="gap:4px"><button class="sia run" onclick="showToast('Running ${j.name}')">Run</button><button class="sia" onclick="showToast('Edit ${j.name}')">Edit</button><button class="sia" style="color:var(--er)" onclick="showToast('Delete ${j.name}')">Del</button></div></td>
+  </tr>`).join('');
+}
+
+// SERVERS
+function buildServers(){
+  const srvs=[
+    {name:'Production',host:'ubuntu@192.168.1.1',status:'online',cpu:'23%',ram:'1.2/4GB',jobs:6},
+    {name:'Staging',host:'dev@10.0.0.5',status:'online',cpu:'8%',ram:'0.6/2GB',jobs:3},
+    {name:'Local Dev',host:'root@localhost',status:'offline',cpu:'—',ram:'—',jobs:0},
+  ];
+  const el=document.getElementById('serverGrid');
+  el.innerHTML=srvs.map(s=>`<div class="srv-card ${s.status}" onclick="showToast('Open ${s.name}')">
+    <div class="srv-card-hd">
+      <div><div class="srv-name">${s.name}</div><div class="srv-host">${s.host}</div></div>
+      <span class="badge b-${s.status==='online'?'ok':'er'}">${s.status==='online'?'Online':'Offline'}</span>
+    </div>
+    <div class="srv-stats">
+      <div class="srv-stat"><div class="srv-stat-lbl">CPU</div><div class="srv-stat-val">${s.cpu}</div></div>
+      <div class="srv-stat"><div class="srv-stat-lbl">RAM</div><div class="srv-stat-val">${s.ram}</div></div>
+      <div class="srv-stat"><div class="srv-stat-lbl">Jobs</div><div class="srv-stat-val">${s.jobs}</div></div>
+      <div class="srv-stat"><div class="srv-stat-lbl">Uptime</div><div class="srv-stat-val">${s.status==='online'?'99.9%':'—'}</div></div>
+    </div>
+    <div class="srv-actions">
+      <button class="sa primary" onclick="event.stopPropagation();nav('terminal')"><svg viewBox="0 0 24 24" style="width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Terminal</button>
+      <button class="sa" onclick="event.stopPropagation();showToast('Test connection')">Test</button>
+      <button class="sa" onclick="event.stopPropagation();showToast('Edit server')">Edit</button>
+    </div>
+  </div>`).join('');
+}
+
+// TERMINAL
+const termLines=[
+  {prompt:'ubuntu@prod',path:'~',cmd:'uptime',out:' 14:23:01 up 42 days,  3:12,  1 user,  load average: 0.14, 0.09, 0.07'},
+  {prompt:'ubuntu@prod',path:'~',cmd:'ls -la /var/www/html',out:'total 128\ndrwxr-xr-x  8 www-data www-data  4096 Apr 18 09:00 .\ndrwxr-xr-x  4 root     root      4096 Jan 15 12:00 ..\n-rw-r--r--  1 www-data www-data  1234 Apr 18 09:00 index.php\n-rw-r--r--  1 www-data www-data 45678 Apr 17 18:22 app.js'},
+  {prompt:'ubuntu@prod',path:'~',cmd:'df -h',out:'Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   12G   36G  25% /\ntmpfs           1.9G     0  1.9G   0% /dev/shm'},
+  {prompt:'ubuntu@prod',path:'~',cmd:'systemctl status nginx',ok:'● nginx.service - A high performance web server\n   Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\n   Active: active (running) since Fri 2026-04-10 12:00:00 UTC; 8 days ago'},
+];
+function buildTerminal(){
+  const el=document.getElementById('termOutput');
+  el.innerHTML=termLines.map(l=>{
+    const outs=l.ok?`<div class="t-line"><span class="t-ok" style="white-space:pre">${l.ok}</span></div>`:
+      l.out.split('\n').map(o=>`<div class="t-line"><span class="t-out">${o}</span></div>`).join('');
+    return`<div class="t-line"><span class="t-prompt">${l.prompt}</span><span class="t-sep">:</span><span class="t-path">${l.path}</span><span class="t-dollar">$&nbsp;</span><span class="t-cmd">${l.cmd}</span></div>${outs}<br>`;
+  }).join('')+`<div class="t-line"><span class="t-prompt">ubuntu@prod</span><span class="t-sep">:</span><span class="t-path">~</span><span class="t-dollar">$&nbsp;</span><span id="termTyped"></span><span style="display:inline-block;width:8px;height:13px;background:var(--ac);vertical-align:middle;animation:blink 1s step-end infinite;border-radius:1px;margin-left:1px" id="cursor"></span></div>`;
+  el.scrollTop=el.scrollHeight;
+}
+const SUGGS=[
+  {cmd:'docker ps -a',badge:'history',bc:'var(--ok)'},
+  {cmd:'docker logs -f app',badge:'history',bc:'var(--ok)'},
+  {cmd:'docker pull nginx',badge:'tldr',bc:'var(--ac)'},
+  {cmd:'docker run -it ubuntu bash',badge:'tldr',bc:'var(--ac)'},
+];
+function handleTermInput(v){
+  const typed=document.getElementById('termTyped');
+  if(typed)typed.textContent=v;
+  const box=document.getElementById('suggestBox');
+  if(!v){box.style.display='none';return;}
+  const matches=SUGGS.filter(s=>s.cmd.toLowerCase().includes(v.toLowerCase())).slice(0,4);
+  if(!matches.length){box.style.display='none';return;}
+  box.style.display='block';
+  box.innerHTML=`<div style="padding:5px 12px;border-bottom:1px solid rgba(255,255,255,.05);font-size:10px;color:var(--t3)">Suggestions — Tab to accept</div>`+
+  matches.map(m=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;transition:background .1s" onmouseover="this.style.background='rgba(249,115,22,0.08)'" onmouseout="this.style.background=''" onclick="acceptSugg('${m.cmd}')"><span style="font-size:9.5px;padding:2px 6px;border-radius:4px;background:${m.bc}22;color:${m.bc};font-weight:700">${m.badge}</span><span style="font-size:12px;color:#E6EDF3;font-family:var(--mono)">${m.cmd}</span></div>`).join('');
+}
+function acceptSugg(cmd){
+  const inp=document.getElementById('termInput');
+  inp.value=cmd;
+  handleTermInput(cmd);
+  inp.focus();
+}
+function handleTermKey(e){
+  if(e.key==='Tab'){e.preventDefault();const first=SUGGS[0];if(first)acceptSugg(first.cmd);}
+  if(e.key==='Enter'){
+    const v=e.target.value.trim();
+    if(!v)return;
+    addTermLine(v);
+    e.target.value='';
+    document.getElementById('termTyped').textContent='';
+    document.getElementById('suggestBox').style.display='none';
+  }
+  if(e.key==='Escape')document.getElementById('suggestBox').style.display='none';
+}
+function addTermLine(cmd){
+  const el=document.getElementById('termOutput');
+  const cursor=document.getElementById('cursor');
+  if(cursor)cursor.remove();
+  const typed=document.getElementById('termTyped');
+  if(typed)typed.textContent='';
+  const cmdLine=document.createElement('div');
+  cmdLine.className='t-line';
+  cmdLine.innerHTML=`<span class="t-prompt">ubuntu@prod</span><span class="t-sep">:</span><span class="t-path">~</span><span class="t-dollar">$&nbsp;</span><span class="t-cmd">${cmd}</span>`;
+  el.appendChild(cmdLine);
+  const out=document.createElement('div');
+  out.className='t-line';
+  const fake={'ls -la':'<span class="t-out">total 48\ndrwxr-xr-x www-data app/</span>','uptime':'<span class="t-ok"> 14:24:00 up 42 days, 3:12, load 0.14</span>','ps aux':'<span class="t-out">USER  PID %CPU %MEM COMMAND\nroot  1  0.0  0.1  init\nnginx 234  0.0  0.2  nginx</span>'};
+  out.innerHTML=fake[cmd]||`<span class="t-out">${cmd}: command executed</span>`;
+  el.appendChild(out);
+  const br=document.createElement('br');
+  el.appendChild(br);
+  const np=document.createElement('div');
+  np.className='t-line';
+  np.innerHTML=`<span class="t-prompt">ubuntu@prod</span><span class="t-sep">:</span><span class="t-path">~</span><span class="t-dollar">$&nbsp;</span><span id="termTyped"></span><span style="display:inline-block;width:8px;height:13px;background:var(--ac);vertical-align:middle;animation:blink 1s step-end infinite;border-radius:1px;margin-left:1px" id="cursor"></span>`;
+  el.appendChild(np);
+  el.scrollTop=el.scrollHeight;
+}
+function connectServer(name){
+  document.querySelectorAll('.ts-item').forEach(i=>i.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  showToast(`Connected to ${name}`);
+}
+
+// SAVED COMMANDS
+function buildSaved(){
+  const cmds=[
+    {name:'Restart Nginx',cmd:'sudo systemctl restart nginx',cat:'Nginx'},
+    {name:'Clear PM2 logs',cmd:'pm2 flush',cat:'Deploy'},
+    {name:'Check disk space',cmd:'df -h',cat:'System'},
+    {name:'List containers',cmd:'docker ps -a',cat:'Docker'},
+    {name:'Deploy latest',cmd:'cd /var/www && git pull && npm i && pm2 restart all',cat:'Deploy'},
+  ];
+  document.getElementById('savedList').innerHTML=cmds.map(c=>`<div class="saved-item">
+    <div class="saved-item-name">${c.name} <span style="font-size:9.5px;padding:2px 6px;border-radius:4px;background:var(--bg5);color:var(--t3)">${c.cat}</span></div>
+    <div class="saved-item-cmd">${c.cmd}</div>
+    <div class="saved-item-actions">
+      <button class="sia run" onclick="showToast('Running: ${c.cmd.substring(0,20)}...')">Run</button>
+      <button class="sia" onclick="showToast('Edit command')">Edit</button>
+      <button class="sia" onclick="showToast('Deleted')">Del</button>
+    </div>
+  </div>`).join('');
+}
+function switchSavedTab(e){document.querySelectorAll('.saved-tab').forEach(t=>t.classList.remove('active'));e.currentTarget.classList.add('active');}
+
+// S3 FILES
+const S3FILES=[
+  {name:'hero-banner.jpg',ext:'jpg',type:'image',size:'99.7 KB',color:'#7C3AED'},
+  {name:'product-showcase.jpg',ext:'jpg',type:'image',size:'99.7 KB',color:'#0891B2'},
+  {name:'farm-aerial.jpg',ext:'jpg',type:'image',size:'99.7 KB',color:'#059669'},
+  {name:'onboarding-intro.mp4',ext:'mp4',type:'video',size:'2.4 MB',color:'#9F7AEA'},
+  {name:'terms.pdf',ext:'pdf',type:'document',size:'245 KB',color:'#DC2626'},
+  {name:'guide.pdf',ext:'pdf',type:'document',size:'1.1 MB',color:'#DC2626'},
+  {name:'photos-batch.zip',ext:'zip',type:'archive',size:'45.6 MB',color:'#D69E2E'},
+  {name:'config.json',ext:'json',type:'other',size:'4 KB',color:'#D69E2E'},
+  {name:'farmland-map.svg',ext:'svg',type:'image',size:'88 KB',color:'#38A169'},
+  {name:'analytics.xlsx',ext:'xlsx',type:'document',size:'320 KB',color:'#38A169'},
+];
+function buildS3(){
+  document.getElementById('s3Grid').innerHTML='<div class="file-grid" id="s3Files">'+S3FILES.map((f,i)=>{
+    const isImg=f.type==='image';
+    const isVid=f.type==='video';
+    return`<div class="fc ${selectedFiles.has(i)?'sel':''}" onclick="toggleFile(${i})">
+      <div class="fc-thumb">
+        ${isImg?`<div class="fc-thumb-img" style="background:${f.color};color:rgba(255,255,255,.15)">${f.ext.toUpperCase()}</div>`:
+          isVid?`<div style="width:100%;height:100%;background:#1a1025;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:#9F7AEA;fill:rgba(159,122,234,.2);stroke-width:1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>`:
+          `<div style="width:100%;height:100%;background:${f.color}18;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" style="width:24px;height:24px;stroke:${f.color};fill:none;stroke-width:1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>`}
+        <div class="fc-ext">${f.ext}</div>
+        <div class="fc-chk">${selectedFiles.has(i)?'<svg viewBox="0 0 24 24" style="width:9px;height:9px;stroke:#fff;fill:none;stroke-width:2.5"><polyline points="20 6 9 17 4 12"/></svg>':''}</div>
+        <div class="fc-acts">
+          <div class="fca" onclick="event.stopPropagation();showToast('Preview ${f.name}')" title="Preview"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <div class="fca" onclick="event.stopPropagation();showToast('Download ${f.name}')" title="Download"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+          <div class="fca" onclick="event.stopPropagation();showToast('Deleted ${f.name}')" title="Delete" style="color:var(--er)"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></div>
+        </div>
+      </div>
+      <div class="fc-body">
+        <div class="fc-name" title="${f.name}">${f.name}</div>
+        <div class="fc-meta">${f.size}</div>
+      </div>
+    </div>`;
+  }).join('')+'</div>';
+}
+function toggleFile(i){if(selectedFiles.has(i))selectedFiles.delete(i);else selectedFiles.add(i);buildS3();}
+function filterFiles(type,el){document.querySelectorAll('.fp').forEach(p=>p.classList.remove('active'));el.classList.add('active');showToast(`Filter: ${type}`);}
+
+// REDIS
+function buildRedis(){
+  const ns=[
+    {name:'user',count:84,keys:[{k:'1001:profile',t:'hash',ttl:'57m'},{k:'1001:session',t:'str',ttl:'23m'},{k:'1002:profile',t:'hash',ttl:'∞'}]},
+    {name:'cache',count:112,keys:[{k:'products:list',t:'str',ttl:'5m'},{k:'products:detail:42',t:'str',ttl:'5m'},{k:'homepage:banner',t:'str',ttl:'1h'}]},
+    {name:'queue',count:18,keys:[{k:'emails:pending',t:'list',ttl:'∞'},{k:'notifications:high',t:'zset',ttl:'∞'}]},
+    {name:'session',count:34,keys:[{k:'ab12cd:data',t:'hash',ttl:'2h'},{k:'ef34gh:data',t:'hash',ttl:'45m'}]},
+  ];
+  const el=document.getElementById('redisTree');
+  el.innerHTML=ns.map((n,i)=>`<div class="rt-ns">
+    <div class="rt-ns-hd" onclick="toggleNs(this)">
+      <svg class="rt-arrow${i===0?' open':''}" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <span class="rt-ns-name">${n.name}:</span>
+      <span class="rt-ns-count">${n.count}</span>
+    </div>
+    <div class="rt-children" style="${i===0?'':'display:none'}">
+      ${n.keys.map(k=>`<div class="rt-key${k.k==='1001:profile'?' active':''}" onclick="selectKey('${n.name}:${k.k}')">
+        <span class="rt-type rt-${k.t==='str'?'str':k.t==='hash'?'hash':k.t==='list'?'list':k.t==='zset'?'zset':'set'}">${k.t.toUpperCase()}</span>
+        <span class="rt-key-name">${k.k}</span>
+        <span class="rt-ttl">${k.ttl}</span>
+      </div>`).join('')}
+    </div>
+  </div>`).join('');
+}
+function toggleNs(el){const ch=el.nextElementSibling;const arr=el.querySelector('.rt-arrow');const open=ch.style.display!=='none';ch.style.display=open?'none':'block';arr.classList.toggle('open',!open);}
+function selectKey(k){document.querySelectorAll('.rt-key').forEach(x=>x.classList.remove('active'));event.currentTarget.classList.add('active');document.querySelector('.redis-val-key').textContent=k;}
+function filterRedisKeys(v){showToast(`Search: ${v}`);}
+
+// HEALTH CHECKS
+function buildHealth(){
+  const checks=[
+    {url:'https://farmland.in/api/health',status:'ok',time:'124ms',hist:[1,1,1,1,1,1,1,1,1,1]},
+    {url:'https://api.farmland.in/v1/health',status:'er',time:'timeout',hist:[1,1,0,1,1,0,0,0,1,0]},
+    {url:'https://farmland.in',status:'ok',time:'89ms',hist:[1,1,1,1,1,1,1,1,1,1]},
+    {url:'https://cdn.farmland.in/status',status:'ok',time:'234ms',hist:[1,1,1,0,1,1,1,1,1,1]},
+  ];
+  document.getElementById('healthChecks').innerHTML=checks.map(c=>`<div class="health-item">
+    <div class="hi-dot" style="background:var(--${c.status==='ok'?'ok':'er'})"></div>
+    <div class="hi-url">${c.url}</div>
+    <div class="hi-time" style="color:var(--${c.status==='ok'?'t3':'er'})">${c.time}</div>
+    <div class="hi-spark">${c.hist.map(h=>`<div class="hi-bar" style="height:${Math.random()*14+6}px;background:var(--${h?'ok':'er'});opacity:.7"></div>`).join('')}</div>
+    <div class="hi-badges">
+      <span class="badge b-${c.status==='ok'?'ok':'er'}">${c.status==='ok'?'Up':'Down'}</span>
+    </div>
+  </div>`).join('');
+}
+
+// SETTINGS
+const COLORS=['#F97316','#6366F1','#8B5CF6','#EC4899','#14B8A6','#0EA5E9','#22C55E','#EAB308','#EF4444','#64748B'];
+let activeColor='#F97316';
+function buildColorSwatches(){
+  document.getElementById('colorSwatches').innerHTML=COLORS.map(c=>`<div class="cs${c===activeColor?' active':''}" style="background:${c}" onclick="changeColor('${c}',this)" title="${c}"></div>`).join('');
+}
+function changeColor(c,el){
+  activeColor=c;
+  document.querySelectorAll('.cs').forEach(s=>s.classList.remove('active'));
+  el.classList.add('active');
+  document.documentElement.style.setProperty('--ac',c);
+  showToast(`Accent color changed to ${c}`);
+}
+function switchSettings(el,section){
+  document.querySelectorAll('.sni').forEach(s=>s.classList.remove('active'));
+  el.classList.add('active');
+  const sections={
+    appearance:`<div class="ss-title">Appearance</div><div class="ss-sub">Customize how Cronix looks</div><div class="form-row"><label class="form-label">Accent color</label><div class="color-swatches" id="colorSwatches"></div><div class="form-hint">Applied across the entire interface</div></div><div class="form-row"><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Compact sidebar</div><div class="frl-sub">Icon-only rail when panel is closed</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Monospace commands</div><div class="frl-sub">Show commands in monospace font</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Animated badges</div><div class="frl-sub">Pulse on running job badges</div></div><div class="toggle" onclick="this.classList.toggle('on')"></div></div></div><button class="save-btn" onclick="showToast('Settings saved')">Save changes</button>`,
+    general:`<div class="ss-title">General</div><div class="ss-sub">Server and runtime configuration</div><div class="form-row"><label class="form-label">Server port</label><input class="form-inp" value="3030"><div class="form-hint">Restart required to apply</div></div><div class="form-row"><label class="form-label">Timezone</label><select class="form-inp"><option>Asia/Kolkata</option><option>UTC</option><option>America/New_York</option></select></div><div class="form-row"><label class="form-label">Log retention days</label><input class="form-inp" value="30" type="number"></div><div class="form-row"><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Open browser on start</div><div class="frl-sub">Auto-open browser when cronix starts</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div><button class="save-btn" onclick="showToast('Settings saved')">Save changes</button>`,
+    notifications:`<div class="ss-title">Notifications</div><div class="ss-sub">Configure how you receive alerts</div><div class="form-row"><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Enable notifications</div><div class="frl-sub">Master toggle for all notifications</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div><div class="form-row"><label class="form-label">Notify email</label><input class="form-inp" value="raj@example.com" placeholder="your@email.com"></div><div class="form-row"><label class="form-label">SMTP host</label><input class="form-inp" value="smtp.gmail.com"></div><div class="form-row"><label class="form-label">SMTP port</label><input class="form-inp" value="587" type="number"></div><div class="form-row"><label class="form-label">SMTP password</label><input class="form-inp" type="password" value="••••••••"></div><div class="form-row"><label class="form-label">Slack webhook URL</label><input class="form-inp" placeholder="https://hooks.slack.com/..."></div><button class="save-btn" onclick="showToast('Test email sent!')">Test email</button>&nbsp;&nbsp;<button class="save-btn" onclick="showToast('Settings saved')">Save changes</button>`,
+    security:`<div class="ss-title">Security</div><div class="ss-sub">Access control and authentication</div><div class="form-row"><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Password protection</div><div class="frl-sub">Require password to access Cronix</div></div><div class="toggle" onclick="this.classList.toggle('on')"></div></div></div><div class="form-row"><label class="form-label">Password</label><input class="form-inp" type="password" placeholder="Set a strong password"></div><div class="form-row"><label class="form-label">Confirm password</label><input class="form-inp" type="password" placeholder="Confirm password"></div><div class="form-row"><div class="form-row-inline"><div class="frl-left"><div class="frl-title">Localhost only</div><div class="frl-sub">Only allow connections from 127.0.0.1</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div><button class="save-btn" onclick="showToast('Settings saved')">Save changes</button>`,
+    danger:`<div class="ss-title" style="color:var(--er)">Danger Zone</div><div class="ss-sub">Irreversible actions — proceed with caution</div><div class="card" style="border-color:rgba(239,68,68,.3)"><div class="card-body" style="display:flex;flex-direction:column;gap:16px"><div class="form-row-inline" style="padding:0"><div class="frl-left"><div class="frl-title">Clear all logs</div><div class="frl-sub">Delete all job execution logs permanently</div></div><button class="danger-btn" onclick="showToast('All logs cleared')">Clear logs</button></div><div class="form-row-inline" style="padding:0"><div class="frl-left"><div class="frl-title">Disable all jobs</div><div class="frl-sub">Pause all running cron jobs</div></div><button class="danger-btn" onclick="showToast('All jobs disabled')">Disable all</button></div><div class="form-row-inline" style="padding:0"><div class="frl-left"><div class="frl-title">Reset to defaults</div><div class="frl-sub">Reset all settings to default values</div></div><button class="danger-btn" onclick="showToast('Settings reset')">Reset</button></div><div class="form-row-inline" style="padding:0"><div class="frl-left"><div class="frl-title">Delete all data</div><div class="frl-sub">Permanently delete all jobs, logs, and settings</div></div><button class="danger-btn" onclick="showToast('Type DELETE to confirm')">Delete all</button></div></div></div>`,
+  };
+  document.getElementById('settingsContent').innerHTML=`<div class="settings-section">${sections[section]||sections.appearance}</div>`;
+  if(section==='appearance')buildColorSwatches();
+}
+
+// SEARCH
+function openSearch(){document.getElementById('searchOverlay').classList.add('open');document.getElementById('searchInput').focus();}
+function closeSearch(e){if(!e||e.target===document.getElementById('searchOverlay'))document.getElementById('searchOverlay').classList.remove('open');}
+function handleSearch(v){
+  if(!v)return;
+  const all=[
+    {type:'Jobs',icon:'clock',items:[{n:'DB Backup',m:'Daily at midnight'},{ n:'Cache Flush',m:'Every 30 min'},{n:'Health Check',m:'Every 5 min'}]},
+    {type:'Servers',icon:'server',items:[{n:'Production',m:'ubuntu@192.168.1.1'},{n:'Staging',m:'dev@10.0.0.5'}]},
+    {type:'Settings',icon:'sliders',items:[{n:'Appearance',m:'Colors and theme'},{n:'Notifications',m:'Email and Slack'}]},
+  ];
+  const res=document.getElementById('searchResults');
+  const matches=all.map(g=>({...g,items:g.items.filter(i=>i.n.toLowerCase().includes(v.toLowerCase()))})).filter(g=>g.items.length>0);
+  if(!matches.length){res.innerHTML='<div class="search-empty">No results for "'+v+'"</div>';return;}
+  res.innerHTML=matches.map(g=>`<div class="sr-group"><div class="sr-group-label">${g.type}</div>${g.items.map(i=>`<div class="sr-item"><div class="sr-icon">${svgI(g.icon)}</div><div><div class="sr-name">${i.n}</div><div class="sr-meta">${i.m}</div></div></div>`).join('')}</div>`).join('');
+}
+function handleSearchKey(e){if(e.key==='Escape')closeSearch();}
+
+// TOAST
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.style.opacity='1';
+  t.style.transform='translateY(0)';
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>{t.style.opacity='0';t.style.transform='translateY(10px)';},2500);
+}
+
+// BLINK ANIMATION
+const style=document.createElement('style');
+style.textContent='@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}';
+document.head.appendChild(style);
+
+// KEYBOARD
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();openSearch();}});
+
+// INIT
+showPanel('core',document.getElementById('ri-core'));
+buildChart();buildActivity();buildJobs();buildServers();buildTerminal();buildSaved();buildS3();buildRedis();buildHealth();buildColorSwatches();
+</script>
+</body>
+</html>

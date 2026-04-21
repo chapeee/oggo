@@ -4,16 +4,20 @@ const fs = require("fs-extra");
 const path = require("path");
 const http = require("http");
 const { spawn } = require("child_process");
+const { execSync } = require("child_process");
 const { Command } = require("commander");
 const { loadConfig, getConfigFilePath, ensureFirstRunPaths } = require("../src/config/configLoader");
-const { getRuntimePath, getConfigPath, getoggoDir } = require("../src/services/platformService");
+const { getRuntimePath, getConfigPath, getoggoDir, getLogsDir } = require("../src/services/platformService");
 const { createInterface } = require("readline");
-const pm2 = require("pm2");
-
-const PROCESS_NAME = "oggo-server";
 
 function askQuestion(rl, question) {
   return new Promise((resolve) => rl.question(question, (answer) => resolve(answer)));
+}
+
+async function updateOggo() {
+  console.log("Updating command suggestion database (tldr cache)...");
+  execSync("npx tldr --update", { stdio: "inherit", windowsHide: true });
+  console.log("tldr cache updated.");
 }
 
 async function promptFirstRun() {
@@ -77,7 +81,90 @@ function runCommand(fn) {
   });
 }
 
+function getRuntimeInfo() {
+  const runtimePath = getRuntimePath();
+  if (!fs.existsSync(runtimePath)) return null;
+  try {
+    return fs.readJSONSync(runtimePath);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writeRuntimeInfo(data) {
+  fs.ensureDirSync(path.dirname(getRuntimePath()));
+  fs.writeJSONSync(getRuntimePath(), data, { spaces: 2 });
+}
+
+function removeRuntimeInfo() {
+  if (fs.existsSync(getRuntimePath())) {
+    fs.removeSync(getRuntimePath());
+  }
+}
+
+function isPidAlive(pid) {
+  if (!pid || !Number.isInteger(Number(pid))) return false;
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function openBrowser(url) {
+  const platform = process.platform;
+  if (platform === "win32") {
+    spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    return;
+  }
+  if (platform === "darwin") {
+    spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
+    return;
+  }
+  spawn("xdg-open", [url], { detached: true, stdio: "ignore" }).unref();
+}
+
+function waitForServer(port, timeoutMs = 15000) {
+  const start = Date.now();
+  const urlPath = "/health";
+  return new Promise((resolve, reject) => {
+    const probe = () => {
+      const req = http.get(
+        {
+          host: "127.0.0.1",
+          port,
+          path: urlPath,
+          timeout: 1500,
+        },
+        (res) => {
+          res.resume();
+          if (res.statusCode && res.statusCode < 500) {
+            resolve(true);
+            return;
+          }
+          if (Date.now() - start > timeoutMs) {
+            reject(new Error(`Server did not become ready on port ${port}`));
+            return;
+          }
+          setTimeout(probe, 300);
+        }
+      );
+      req.on("error", () => {
+        if (Date.now() - start > timeoutMs) {
+          reject(new Error(`Server did not become ready on port ${port}`));
+          return;
+        }
+        setTimeout(probe, 300);
+      });
+      req.on("timeout", () => req.destroy());
+    };
+    probe();
+  });
+}
+
 async function startOggo() {
+  ensureFirstRunPaths();
   const configPath = getConfigPath();
   if (!fs.existsSync(configPath)) {
     const firstRunConfig = await promptFirstRun();
@@ -85,99 +172,141 @@ async function startOggo() {
     fs.writeJsonSync(configPath, firstRunConfig, { spaces: 2 });
   }
 
+  const config = loadConfig();
+  const runtime = getRuntimeInfo();
+  if (runtime?.pid && isPidAlive(runtime.pid)) {
+    const liveUrl = runtime.url || `http://localhost:${runtime.port || 3030}`;
+    console.log(`Oggo is already running at ${liveUrl} (pid ${runtime.pid})`);
+    openBrowser(liveUrl);
+    process.exit(0);
+  }
+
   console.log("Starting Oggo...");
+  const basePort = Number(process.env.PORT || config.port || 3030);
+  const portsToTry = [basePort, basePort + 1, basePort + 2, basePort + 3, basePort + 4];
 
-  pm2.connect((err) => {
-    if (err) {
-      console.error("Failed to connect to PM2", err);
-      process.exit(2);
-    }
+  for (const port of portsToTry) {
+    const url = `http://localhost:${port}`;
 
-    pm2.start(
-      {
-        name: PROCESS_NAME,
-        script: path.join(__dirname, "../src/server.js"),
-        exec_mode: "fork",
-        max_memory_restart: "1G",
-        autorestart: true,
-      },
-      (err, apps) => {
-        pm2.disconnect();
-        if (err) {
-          console.error("Failed to start Oggo", err);
-          process.exit(2);
-        }
-        console.log("✓ Oggo is running");
-        console.log("✓ Run 'oggo status' to check status");
+    let childExitCode = null;
+    let childCrashed = false;
+
+    const child = spawn(process.execPath, [path.join(__dirname, "../src/server.js")], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, PORT: String(port) },
+    });
+    child.unref();
+
+    writeRuntimeInfo({ pid: child.pid, port, url, startedAt: new Date().toISOString() });
+
+    const crashMonitor = setTimeout(() => {
+      if (childExitCode !== null && childExitCode !== 0) {
+        childCrashed = true;
       }
-    );
-  });
+    }, 2000);
+
+    child.on("exit", (code) => {
+      childExitCode = code;
+      clearTimeout(crashMonitor);
+    });
+
+    try {
+      await waitForServer(port, 10000);
+      console.log(`✓ Oggo is running at ${url}`);
+      openBrowser(url);
+      process.exit(0);
+    } catch (_error) {
+      if (childCrashed || (childExitCode !== null && childExitCode !== 0)) {
+        console.log(`✗ Oggo process crashed on port ${port} (exit code: ${childExitCode || "unknown"}). Trying next port...`);
+      }
+      if (isPidAlive(child.pid)) {
+        try {
+          process.kill(child.pid);
+        } catch (_killError) {}
+      }
+      removeRuntimeInfo();
+    }
+  }
+  throw new Error(`Server did not become ready on ports ${portsToTry.join(", ")}`);
 }
 
 async function stopOggo() {
   console.log("Stopping Oggo...");
-  pm2.connect((err) => {
-    if (err) {
-      console.error("Failed to connect to PM2");
-      process.exit(2);
-    }
-    pm2.stop(PROCESS_NAME, (err) => {
-      pm2.disconnect();
-      if (err) {
-        console.error("Oggo is not running");
-      } else {
-        console.log("Oggo stopped");
-      }
-    });
-  });
+  const runtime = getRuntimeInfo();
+  if (!runtime?.pid) {
+    console.log("Oggo is not running");
+    return;
+  }
+  if (!isPidAlive(runtime.pid)) {
+    removeRuntimeInfo();
+    console.log("Oggo is not running");
+    return;
+  }
+  try {
+    process.kill(Number(runtime.pid));
+    removeRuntimeInfo();
+    console.log("Oggo stopped");
+  } catch (error) {
+    throw new Error(`Failed to stop process ${runtime.pid}: ${error.message}`);
+  }
 }
 
 async function restartOggo() {
   console.log("Restarting Oggo...");
-  pm2.connect((err) => {
-    if (err) {
-      console.error("Failed to connect to PM2");
-      process.exit(2);
-    }
-    pm2.restart(PROCESS_NAME, (err) => {
-      pm2.disconnect();
-      if (err) {
-        console.error("Failed to restart Oggo");
-      } else {
-        console.log("Oggo restarted");
-      }
-    });
-  });
+  await stopOggo();
+  await startOggo();
 }
 
 async function statusOggo() {
-  pm2.connect((err) => {
-    if (err) {
-      console.error("Failed to connect to PM2");
-      process.exit(2);
-    }
-    pm2.describe(PROCESS_NAME, (err, processDescription) => {
-      pm2.disconnect();
-      if (err || processDescription.length === 0) {
-        console.log("Oggo status: stopped");
-      } else {
-        const status = processDescription[0].pm2_env.status;
-        if (status === "online") {
-          console.log("Oggo status: running");
-        } else {
-          console.log(`Oggo status: ${status}`);
-        }
-      }
-    });
-  });
+  const runtime = getRuntimeInfo();
+  if (!runtime?.pid) {
+    console.log("Oggo status: stopped");
+    return;
+  }
+  const alive = isPidAlive(runtime.pid);
+  if (!alive) {
+    removeRuntimeInfo();
+    console.log("Oggo status: stopped");
+    return;
+  }
+  console.log("Oggo status: running");
+  console.log(`PID: ${runtime.pid}`);
+  console.log(`URL: ${runtime.url || `http://localhost:${runtime.port || 3030}`}`);
 }
 
 async function openOggo() {
-  console.log("Please open http://localhost:3030 in your browser.");
+  const runtime = getRuntimeInfo();
+  const url = runtime?.url || (runtime?.port ? `http://localhost:${runtime.port}` : null);
+  if (url) {
+    openBrowser(url);
+    console.log(`Opened ${url}`);
+    return;
+  }
+  const config = loadConfig();
+  const port = Number(process.env.PORT || config.port || 3030);
+  const fallback = `http://localhost:${port}`;
+  openBrowser(fallback);
+  console.log(`Opened ${fallback}`);
 }
 
 async function showConfig() {
+  const config = loadConfig();
   console.log(`Config path: ${getConfigPath()}`);
+  console.log(JSON.stringify(config, null, 2));
+}
+
+async function logsOggo() {
+  const logFile = path.join(getLogsDir(), "app.log");
+  if (!fs.existsSync(logFile)) {
+    console.log("No log file found yet.");
+    return;
+  }
+  const content = fs.readFileSync(logFile, "utf8");
+  const lines = content.split(/\r?\n/).filter(Boolean);
+  const recent = lines.slice(-80);
+  console.log(recent.join("\n"));
 }
 
 const program = new Command();
@@ -187,6 +316,8 @@ program.command("stop").description("Stop oggo-server").action(() => runCommand(
 program.command("restart").description("Restart oggo-server").action(() => runCommand(restartOggo));
 program.command("status").description("Show Oggo status").action(() => runCommand(statusOggo));
 program.command("open").description("Open Oggo UI in browser").action(() => runCommand(openOggo));
+program.command("logs").description("Show recent Oggo logs").action(() => runCommand(logsOggo));
 program.command("config").description("Show config file path").action(() => runCommand(showConfig));
+program.command("update").description("Update command suggestion database").action(() => runCommand(updateOggo));
 
 program.parse(process.argv);

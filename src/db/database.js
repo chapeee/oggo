@@ -1,4 +1,5 @@
 const fs = require("fs-extra");
+const path = require("path");
 const Database = require("better-sqlite3");
 const mysql = require("mysql2/promise");
 const { getoggoDataDir, getDbPath } = require("../services/platformService");
@@ -6,6 +7,7 @@ const { loadConfig } = require("../config/configLoader");
 
 let db;
 let engine = "sqlite";
+const migrationsDir = path.join(__dirname, "migrations");
 
 function normalizeParams(sql, params) {
   if (!params || Array.isArray(params)) return { sql, values: params || [] };
@@ -128,6 +130,255 @@ function getSchemaStatements(targetEngine) {
         builtin TINYINT(1) DEFAULT 0,
         created_at VARCHAR(64)
       )`,
+      `CREATE TABLE IF NOT EXISTS command_categories (
+        id VARCHAR(64) PRIMARY KEY,
+        server_id VARCHAR(64),
+        name VARCHAR(255) NOT NULL,
+        scope VARCHAR(16) NOT NULL,
+        sort_order INT DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS saved_commands (
+        id VARCHAR(64) PRIMARY KEY,
+        server_id VARCHAR(64),
+        name VARCHAR(255) NOT NULL,
+        command TEXT NOT NULL,
+        category VARCHAR(255),
+        scope VARCHAR(16) NOT NULL,
+        sort_order INT DEFAULT 0,
+        created_at VARCHAR(64),
+        last_used_at VARCHAR(64),
+        use_count INT DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS s3_connections (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        color VARCHAR(32),
+        access_key_id VARCHAR(255) NOT NULL,
+        secret_access_key_encrypted LONGTEXT NOT NULL,
+        region VARCHAR(64) NOT NULL,
+        bucket_name VARCHAR(255) NOT NULL,
+        root_prefix TEXT,
+        enabled TINYINT(1) DEFAULT 1,
+        last_tested_at VARCHAR(64),
+        last_test_result VARCHAR(32),
+        last_test_message TEXT,
+        file_count BIGINT DEFAULT 0,
+        total_size_bytes BIGINT DEFAULT 0,
+        created_at VARCHAR(64),
+        updated_at VARCHAR(64),
+        sort_order INT DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS job_s3_settings (
+        job_id VARCHAR(64) PRIMARY KEY,
+        upload_enabled TINYINT(1) DEFAULT 0,
+        connection_id VARCHAR(64),
+        upload_condition VARCHAR(32) DEFAULT 'failure',
+        file_pattern VARCHAR(255) DEFAULT '{job}-{timestamp}.log',
+        updated_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS aws_connections (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        color VARCHAR(32),
+        access_key_id VARCHAR(255) NOT NULL,
+        secret_access_key_encrypted LONGTEXT NOT NULL,
+        session_token_encrypted LONGTEXT,
+        default_region VARCHAR(64) NOT NULL,
+        account_id VARCHAR(32),
+        service_access LONGTEXT,
+        last_tested_at VARCHAR(64),
+        last_test_result VARCHAR(32),
+        last_test_message TEXT,
+        enabled TINYINT(1) DEFAULT 1,
+        created_at VARCHAR(64),
+        updated_at VARCHAR(64),
+        sort_order INT DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS ssl_monitors (
+        id VARCHAR(64) PRIMARY KEY,
+        domain VARCHAR(255) NOT NULL,
+        port INT DEFAULT 443,
+        check_interval VARCHAR(32) DEFAULT 'daily',
+        thresholds_json LONGTEXT,
+        channels_json LONGTEXT,
+        issuer VARCHAR(255),
+        issued_at VARCHAR(64),
+        expires_at VARCHAR(64),
+        days_remaining INT,
+        status VARCHAR(32) DEFAULT 'unknown',
+        last_checked_at VARCHAR(64),
+        last_error TEXT,
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS dns_monitors (
+        id VARCHAR(64) PRIMARY KEY,
+        domain VARCHAR(255) NOT NULL,
+        record_type VARCHAR(16) DEFAULT 'A',
+        expected_value LONGTEXT,
+        check_interval VARCHAR(32) DEFAULT 'hourly',
+        channels_json LONGTEXT,
+        current_value LONGTEXT,
+        status VARCHAR(32) DEFAULT 'unknown',
+        last_checked_at VARCHAR(64),
+        last_error TEXT,
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS port_monitors (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        host VARCHAR(255) NOT NULL,
+        port INT NOT NULL,
+        protocol VARCHAR(8) DEFAULT 'tcp',
+        expected_banner VARCHAR(255),
+        check_interval VARCHAR(32) DEFAULT 'hourly',
+        channels_json LONGTEXT,
+        status VARCHAR(32) DEFAULT 'unknown',
+        response_time_ms INT,
+        last_checked_at VARCHAR(64),
+        last_error TEXT,
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS env_variables (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        source_type VARCHAR(32) DEFAULT 'manual',
+        value_encrypted LONGTEXT,
+        aws_connection_id VARCHAR(64),
+        secret_ref VARCHAR(512),
+        secret_key VARCHAR(255),
+        scope_type VARCHAR(32) DEFAULT 'global',
+        scope_target_id VARCHAR(64),
+        sensitive TINYINT(1) DEFAULT 1,
+        group_name VARCHAR(255),
+        last_used_at VARCHAR(64),
+        created_at VARCHAR(64),
+        updated_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS http_checks (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        url TEXT NOT NULL,
+        method VARCHAR(16) DEFAULT 'GET',
+        headers_json LONGTEXT,
+        body_text LONGTEXT,
+        timeout_seconds INT DEFAULT 10,
+        follow_redirects TINYINT(1) DEFAULT 1,
+        assertions_json LONGTEXT,
+        alert_after_failures INT DEFAULT 1,
+        retry_before_fail TINYINT(1) DEFAULT 0,
+        channels_json LONGTEXT,
+        status VARCHAR(32) DEFAULT 'unknown',
+        last_response_time_ms INT,
+        last_status_code INT,
+        last_checked_at VARCHAR(64),
+        last_error TEXT,
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspaces (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        color VARCHAR(32),
+        default_region VARCHAR(64) DEFAULT 'us-east-1',
+        created_at VARCHAR(64),
+        updated_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_aws_connections (
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64) NOT NULL,
+        is_primary TINYINT(1) DEFAULT 0,
+        PRIMARY KEY (workspace_id, aws_connection_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_s3_configs (
+        workspace_id VARCHAR(64) NOT NULL,
+        s3_config_id VARCHAR(64) NOT NULL,
+        PRIMARY KEY (workspace_id, s3_config_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_sns_topics (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        topic_name VARCHAR(255) NOT NULL,
+        topic_arn TEXT,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_ses_identities (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        identity VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_cloudwatch_groups (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        name VARCHAR(255) NOT NULL,
+        log_group_prefix TEXT,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_rds_instances (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        instance_identifier VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_ec2_instances (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        instance_id VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        linked_server_id VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_lambda_functions (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        function_name VARCHAR(255) NOT NULL,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS workspace_secrets (
+        id VARCHAR(64) PRIMARY KEY,
+        workspace_id VARCHAR(64) NOT NULL,
+        aws_connection_id VARCHAR(64),
+        secret_name VARCHAR(255) NOT NULL,
+        secret_arn TEXT,
+        region VARCHAR(64),
+        created_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS package_pins (
+        id VARCHAR(64) PRIMARY KEY,
+        server_id VARCHAR(64) NOT NULL,
+        package_manager VARCHAR(64) NOT NULL,
+        package_name VARCHAR(255) NOT NULL,
+        version VARCHAR(128),
+        created_at VARCHAR(64),
+        updated_at VARCHAR(64)
+      )`,
+      `CREATE TABLE IF NOT EXISTS package_history (
+        id VARCHAR(64) PRIMARY KEY,
+        server_id VARCHAR(64) NOT NULL,
+        package_manager VARCHAR(64) NOT NULL,
+        package_name VARCHAR(255) NOT NULL,
+        action VARCHAR(64) NOT NULL,
+        from_version VARCHAR(128),
+        to_version VARCHAR(128),
+        status VARCHAR(32) NOT NULL,
+        output LONGTEXT,
+        triggered_by VARCHAR(128),
+        created_at VARCHAR(64)
+      )`,
     ];
   }
 
@@ -240,6 +491,255 @@ function getSchemaStatements(targetEngine) {
       builtin INTEGER DEFAULT 0,
       created_at TEXT
     )`,
+    `CREATE TABLE IF NOT EXISTS command_categories (
+      id TEXT PRIMARY KEY,
+      server_id TEXT,
+      name TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS saved_commands (
+      id TEXT PRIMARY KEY,
+      server_id TEXT,
+      name TEXT NOT NULL,
+      command TEXT NOT NULL,
+      category TEXT,
+      scope TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT,
+      last_used_at TEXT,
+      use_count INTEGER DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS s3_connections (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      access_key_id TEXT NOT NULL,
+      secret_access_key_encrypted TEXT NOT NULL,
+      region TEXT NOT NULL,
+      bucket_name TEXT NOT NULL,
+      root_prefix TEXT,
+      enabled INTEGER DEFAULT 1,
+      last_tested_at TEXT,
+      last_test_result TEXT,
+      last_test_message TEXT,
+      file_count INTEGER DEFAULT 0,
+      total_size_bytes INTEGER DEFAULT 0,
+      created_at TEXT,
+      updated_at TEXT,
+      sort_order INTEGER DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS job_s3_settings (
+      job_id TEXT PRIMARY KEY,
+      upload_enabled INTEGER DEFAULT 0,
+      connection_id TEXT,
+      upload_condition TEXT DEFAULT 'failure',
+      file_pattern TEXT DEFAULT '{job}-{timestamp}.log',
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS aws_connections (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      access_key_id TEXT NOT NULL,
+      secret_access_key_encrypted TEXT NOT NULL,
+      session_token_encrypted TEXT,
+      default_region TEXT NOT NULL,
+      account_id TEXT,
+      service_access TEXT,
+      last_tested_at TEXT,
+      last_test_result TEXT,
+      last_test_message TEXT,
+      enabled INTEGER DEFAULT 1,
+      created_at TEXT,
+      updated_at TEXT,
+      sort_order INTEGER DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS ssl_monitors (
+      id TEXT PRIMARY KEY,
+      domain TEXT NOT NULL,
+      port INTEGER DEFAULT 443,
+      check_interval TEXT DEFAULT 'daily',
+      thresholds_json TEXT,
+      channels_json TEXT,
+      issuer TEXT,
+      issued_at TEXT,
+      expires_at TEXT,
+      days_remaining INTEGER,
+      status TEXT DEFAULT 'unknown',
+      last_checked_at TEXT,
+      last_error TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS dns_monitors (
+      id TEXT PRIMARY KEY,
+      domain TEXT NOT NULL,
+      record_type TEXT DEFAULT 'A',
+      expected_value TEXT,
+      check_interval TEXT DEFAULT 'hourly',
+      channels_json TEXT,
+      current_value TEXT,
+      status TEXT DEFAULT 'unknown',
+      last_checked_at TEXT,
+      last_error TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS port_monitors (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      host TEXT NOT NULL,
+      port INTEGER NOT NULL,
+      protocol TEXT DEFAULT 'tcp',
+      expected_banner TEXT,
+      check_interval TEXT DEFAULT 'hourly',
+      channels_json TEXT,
+      status TEXT DEFAULT 'unknown',
+      response_time_ms INTEGER,
+      last_checked_at TEXT,
+      last_error TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS env_variables (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      source_type TEXT DEFAULT 'manual',
+      value_encrypted TEXT,
+      aws_connection_id TEXT,
+      secret_ref TEXT,
+      secret_key TEXT,
+      scope_type TEXT DEFAULT 'global',
+      scope_target_id TEXT,
+      sensitive INTEGER DEFAULT 1,
+      group_name TEXT,
+      last_used_at TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS http_checks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      method TEXT DEFAULT 'GET',
+      headers_json TEXT,
+      body_text TEXT,
+      timeout_seconds INTEGER DEFAULT 10,
+      follow_redirects INTEGER DEFAULT 1,
+      assertions_json TEXT,
+      alert_after_failures INTEGER DEFAULT 1,
+      retry_before_fail INTEGER DEFAULT 0,
+      channels_json TEXT,
+      status TEXT DEFAULT 'unknown',
+      last_response_time_ms INTEGER,
+      last_status_code INTEGER,
+      last_checked_at TEXT,
+      last_error TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      default_region TEXT DEFAULT 'us-east-1',
+      created_at TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_aws_connections (
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT NOT NULL,
+      is_primary INTEGER DEFAULT 0,
+      PRIMARY KEY (workspace_id, aws_connection_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_s3_configs (
+      workspace_id TEXT NOT NULL,
+      s3_config_id TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, s3_config_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_sns_topics (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      topic_name TEXT NOT NULL,
+      topic_arn TEXT,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_ses_identities (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      identity TEXT NOT NULL,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_cloudwatch_groups (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      name TEXT NOT NULL,
+      log_group_prefix TEXT,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_rds_instances (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      instance_identifier TEXT NOT NULL,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_ec2_instances (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      instance_id TEXT NOT NULL,
+      region TEXT,
+      linked_server_id TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_lambda_functions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      function_name TEXT NOT NULL,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS workspace_secrets (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      aws_connection_id TEXT,
+      secret_name TEXT NOT NULL,
+      secret_arn TEXT,
+      region TEXT,
+      created_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS package_pins (
+      id TEXT PRIMARY KEY,
+      server_id TEXT NOT NULL,
+      package_manager TEXT NOT NULL,
+      package_name TEXT NOT NULL,
+      version TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS package_history (
+      id TEXT PRIMARY KEY,
+      server_id TEXT NOT NULL,
+      package_manager TEXT NOT NULL,
+      package_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      from_version TEXT,
+      to_version TEXT,
+      status TEXT NOT NULL,
+      output TEXT,
+      triggered_by TEXT,
+      created_at TEXT
+    )`,
   ];
 }
 
@@ -265,6 +765,57 @@ async function createMysqlPool(mysqlConfig) {
   });
 }
 
+function getMigrationTableSql(targetEngine) {
+  if (targetEngine === "mysql") {
+    return `CREATE TABLE IF NOT EXISTS schema_migrations (
+      id VARCHAR(255) PRIMARY KEY,
+      applied_at VARCHAR(64) NOT NULL
+    )`;
+  }
+  return `CREATE TABLE IF NOT EXISTS schema_migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`;
+}
+
+async function listMigrationFiles() {
+  const exists = await fs.pathExists(migrationsDir);
+  if (!exists) return [];
+  const entries = await fs.readdir(migrationsDir);
+  return entries
+    .filter((file) => /^\d+_.*\.js$/.test(file))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function isMigrationApplied(id) {
+  const row = await get("SELECT id FROM schema_migrations WHERE id = ?", [id]);
+  return Boolean(row);
+}
+
+async function markMigrationApplied(id) {
+  await run(
+    "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+    [id, new Date().toISOString()]
+  );
+}
+
+async function runMigrations() {
+  await exec(getMigrationTableSql(engine));
+  const files = await listMigrationFiles();
+  for (const file of files) {
+    const migrationId = file.replace(/\.js$/, "");
+    if (await isMigrationApplied(migrationId)) continue;
+    // Load migrations lazily so new files are picked up without restart tooling.
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    const migration = require(path.join(migrationsDir, file));
+    if (typeof migration?.up !== "function") {
+      throw new Error(`Migration ${migrationId} must export an up() function`);
+    }
+    await migration.up({ exec, getDbEngine });
+    await markMigrationApplied(migrationId);
+  }
+}
+
 async function initializeDatabase() {
   if (db) return db;
 
@@ -279,6 +830,7 @@ async function initializeDatabase() {
     for (const statement of statements) {
       await db.query(statement);
     }
+    await runMigrations();
     return db;
   }
 
@@ -290,6 +842,7 @@ async function initializeDatabase() {
   for (const statement of statements) {
     db.exec(statement);
   }
+  await runMigrations();
   return db;
 }
 

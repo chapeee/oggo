@@ -131,19 +131,21 @@ function parseCrontab(content) {
     .filter(Boolean);
 }
 
-function executeRemoteCommand(server, command) {
+function executeRemoteCommand(server, command, options = {}) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     let output = "";
     let errorOutput = "";
     let completed = false;
+    const startedAt = Date.now();
+    const timeoutMs = Number(options.timeoutMs || 15000);
 
     const timeout = setTimeout(() => {
       if (completed) return;
       completed = true;
       conn.end();
       reject(new Error("Connection timeout"));
-    }, 15000);
+    }, timeoutMs);
 
     conn.on("ready", () => {
       conn.exec(command, (err, stream) => {
@@ -167,7 +169,7 @@ function executeRemoteCommand(server, command) {
           completed = true;
           clearTimeout(timeout);
           conn.end();
-          resolve({ output, errorOutput, exitCode: code });
+          resolve({ output, errorOutput, exitCode: code, durationMs: Date.now() - startedAt });
         });
       });
     });
