@@ -2,7 +2,7 @@ const WebSocket = require("ws");
 const { Client } = require("ssh2");
 const { v4: uuidv4 } = require("uuid");
 const { run } = require("../db/database");
-const { buildConnectConfig } = require("./sshService");
+const { buildConnectConfig, resolveServerCredentials } = require("./sshService");
 const { detectError, recordTerminalHistory } = require("./commandIntelService");
 
 const GUI_PREFIX = "\x1b[38;5;208m[GUI]\x1b[0m";
@@ -151,7 +151,11 @@ async function createSession(serverId, serverRow) {
       reject(error);
     });
 
-    conn.connect(buildConnectConfig(serverRow));
+    resolveServerCredentials(serverRow)
+      .then((resolved) => {
+        conn.connect(buildConnectConfig(resolved));
+      })
+      .catch((error) => reject(error));
   });
 }
 
@@ -187,7 +191,7 @@ async function detachClient(sessionId, ws) {
  *
  * @param {string} sessionId
  * @param {string} command
- * @param {{ timeoutMs?: number, stdin?: string }} [options]
+ * @param {{ timeoutMs?: number, stdin?: string, silent?: boolean }} [options]
  * @returns {Promise<{output: string, errorOutput: string, exitCode: number}>}
  */
 async function executeGuiCommand(sessionId, command, options = {}) {
@@ -196,7 +200,9 @@ async function executeGuiCommand(sessionId, command, options = {}) {
     throw new Error("Terminal session is not active");
   }
 
-  broadcastTerminalData(session, `${GUI_PREFIX} ${command}\r\n`);
+  if (!options.silent) {
+    broadcastTerminalData(session, `${GUI_PREFIX} ${command}\r\n`);
+  }
   const timeoutMs = Number(options.timeoutMs || 15000);
   const stdin = options.stdin === undefined || options.stdin === null ? null : String(options.stdin);
   const result = await new Promise((resolve, reject) => {
@@ -229,13 +235,17 @@ async function executeGuiCommand(sessionId, command, options = {}) {
       stream.on("data", (data) => {
         const text = data.toString();
         output += text;
-        broadcastTerminalData(session, text);
+        if (!options.silent) {
+          broadcastTerminalData(session, text);
+        }
       });
 
       stream.stderr.on("data", (data) => {
         const text = data.toString();
         errorOutput += text;
-        broadcastTerminalData(session, text);
+        if (!options.silent) {
+          broadcastTerminalData(session, text);
+        }
       });
 
       stream.on("close", (code) => {

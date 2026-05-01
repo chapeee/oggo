@@ -11,6 +11,13 @@ const {
   deleteSnippet,
 } = require("../services/commandIntelService");
 const { searchCommands, getCommand } = require("../services/tldrService");
+const {
+  getAssistantSettings,
+  saveAssistantSettings,
+  testAssistantConnection,
+  forgetAssistantKey,
+  generateAssistantCommand,
+} = require("../services/terminalAiService");
 
 const router = express.Router();
 
@@ -121,4 +128,61 @@ router.delete("/snippets/:id", async (req, res) => {
   res.json({ data: { deleted: true } });
 });
 
-module.exports = router;
+router.get("/ai/settings", async (_req, res) => {
+  try {
+    const data = await getAssistantSettings();
+    return res.json({ data });
+  } catch (error) {
+    return res.status(500).json({ error: error.message, code: "AI_SETTINGS_READ_FAILED" });
+  }
+});
+
+router.post("/ai/settings", async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const data = await saveAssistantSettings({
+      enabled: payload.enabled,
+      model: payload.model,
+      apiKey: payload.apiKey,
+      validate: Boolean(payload.validate),
+    });
+    return res.json({ data });
+  } catch (error) {
+    return res.status(400).json({ error: error.message, code: "AI_SETTINGS_SAVE_FAILED" });
+  }
+});
+
+router.post("/ai/test", async (_req, res) => {
+  try {
+    const data = await testAssistantConnection();
+    return res.json({ data });
+  } catch (error) {
+    return res.status(400).json({ error: error.message, code: "AI_TEST_FAILED" });
+  }
+});
+
+router.delete("/ai/key", async (_req, res) => {
+  try {
+    const data = await forgetAssistantKey();
+    return res.json({ data });
+  } catch (error) {
+    return res.status(500).json({ error: error.message, code: "AI_KEY_DELETE_FAILED" });
+  }
+});
+
+router.post("/ai/command", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const prompt = String(req.body?.prompt || "").trim();
+    if (!sessionId) {
+      return res.status(400).json({ error: "sessionId is required", code: "VALIDATION_ERROR" });
+    }
+    if (!prompt) {
+      return res.status(400).json({ error: "prompt is required", code: "VALIDATION_ERROR" });
+    }
+    const data = await generateAssistantCommand({ sessionId, prompt });
+    return res.json({ data });
+  } catch (error) {
+    const message = String(error?.message || "AI command failed");
+    const status = message.includes("disabled") || message.includes("missing") ? 400 : 500;
+    return res.status(status).json({ error: message, c

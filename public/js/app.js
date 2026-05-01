@@ -10,12 +10,20 @@ const state = {
     software: "software-package-manager",
     storage: "s3",
     "developer-tools": "health-checks",
+    vault: "vault-passwords",
     aws: "all-workspaces",
     settings: "settings",
   },
   jobs: [],
   logs: [],
   settings: null,
+  aiAssistant: {
+    enabled: false,
+    provider: "nvidia",
+    model: "meta/llama-3.1-70b-instruct",
+    hasApiKey: false,
+    models: [],
+  },
   dashboard: null,
   servers: [],
   softwareServerId: "local",
@@ -39,6 +47,9 @@ const state = {
   packageDescCache: {},
   packageAutoScanTimer: null,
   packageAutoScanLastRunAt: 0,
+  vaultEntries: [],
+  vaultFilter: "all",
+  vaultSearch: "",
   installerTab: "catalog",
   installerOutput: null,
   awsConnections: [],
@@ -169,6 +180,14 @@ const NAV_STRUCTURE = {
       { view: "http-checks", label: "HTTP Checks", icon: "activity", badge: () => String(state.httpChecks.length || 0) },
     ],
   },
+  vault: {
+    title: "Vault",
+    items: [
+      { view: "vault-passwords", label: "Passwords", icon: "key-round" },
+      { action: "vault-shared", label: "Shared secrets", icon: "share-2" },
+      { action: "add-password", label: "Add password", icon: "plus-circle", secondary: true },
+    ],
+  },
   aws: {
     title: "AWS Services",
     items: [],
@@ -202,6 +221,7 @@ const VIEW_TO_SECTION = {
   "dns-monitor": "developer-tools",
   "port-scanner": "developer-tools",
   "env-vars": "developer-tools",
+  "vault-passwords": "vault",
   "aws-connections": "aws",
   workspaces: "aws",
   "all-workspaces": "aws",
@@ -227,6 +247,7 @@ let terminalCurrentLine = "";
 let terminalSuggestions = [];
 let terminalSuggestionIndex = -1;
 let terminalHistoryOverlay = { visible: false, items: [], selected: 0, query: "" };
+let terminalAiCard = { mode: "hidden", command: "", error: "", loadingText: "" };
 
 const presets = [
   ["Every minute", "* * * * *"],
@@ -257,6 +278,171 @@ function toast(message, type = "info") {
   node.textContent = message;
   el("toast-container").appendChild(node);
   setTimeout(() => node.remove(), 2800);
+}
+
+const GITHUB_REPO_SLUG = "chapeee/oggo";
+
+function shouldIgnoreGlobalError(meta = {}) {
+  const message = String(meta.message || "");
+  const stack = String(meta.stack || "");
+  const source = String(meta.source || "");
+
+  const lowerSource = source.toLowerCase();
+  if (lowerSource.startsWith("chrome-extension://") || lowerSource.startsWith("moz-extension://")) return true;
+  if (lowerSource.includes("/extensions/")) return true;
+  if (lowerSource.endsWith("/content.js") || lowerSource.endsWith("content.js")) return true;
+
+  const lowerStack = stack.toLowerCase();
+  if (lowerStack.includes("chrome-extension://") || lowerStack.includes("moz-extension://")) return true;
+  if (lowerStack.includes("content.js")) return true;
+  if (lowerStack.includes("window.self.window.top.window.onload")) return true;
+
+  if (message.includes("ResizeObserver loop")) return true;
+  return false;
+}
+
+function buildBugReportText(meta = {}) {
+  const lines = [];
+  lines.push("## Summary");
+  lines.push(String(meta.message || "(no message)"));
+  lines.push("");
+  lines.push("## Context");
+  lines.push(`URL: ${window.location.href}`);
+  lines.push(`View: ${String(state?.view || "unknown")}`);
+  lines.push(`UserAgent: ${navigator.userAgent}`);
+  lines.push(`Time: ${new Date().toISOString()}`);
+  if (meta.source) lines.push(`Source: ${meta.source}${meta.lineno ? `:${meta.lineno}` : ""}${meta.colno ? `:${meta.colno}` : ""}`);
+  lines.push("");
+  if (meta.stack) {
+    lines.push("## Stack");
+    lines.push("```text");
+    lines.push(String(meta.stack));
+    lines.push("```");
+  }
+  return lines.join("\n");
+}
+
+function openBugReportModal(reportText, title = "Unexpected Error") {
+  const modal = el("job-modal");
+  const body = el("job-modal-body");
+  if (!modal || !body) return;
+
+  const githubUrl = `https://github.com/${GITHUB_REPO_SLUG}/issues/new?title=${encodeURIComponent(
+    title
+  )}&body=${encodeURIComponent(reportText)}`;
+
+  body.innerHTML = `
+    <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${escapeHtml(title)}</h3>
+      <button type="button" id="bug-report-close" class="text-gray-400 hover:text-gray-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div class="p-6 space-y-3">
+      <div class="text-sm text-gray-600 dark:text-gray-300">
+        A runtime error occurred. You can report it with the details below.
+      </div>
+      <textarea id="bug-report-text" class="input font-mono text-xs" rows="12" spellcheck="false" readonly>${escapeHtml(
+        reportText
+      )}</textarea>
+      <div class="flex flex-wrap gap-2 justify-end">
+        <button id="bug-report-copy" class="btn-secondary">Copy</button>
+        <a id="bug-report-github" class="btn-primary" href="${escapeHtml(githubUrl)}" target="_blank" rel="noreferrer">Report on GitHub</a>
+        <button id="bug-report-dismiss" class="btn-secondary">Dismiss</button>
+      </div>
+      <div class="text-xs text-gray-500 dark:text-gray-400">
+        Note: If GitHub doesn’t prefill the form (issue forms), use Copy and paste.
+      </div>
+    </div>
+  `;
+
+  modal.classList.remove("hidden");
+  if (window.lucide) window.lucide.createIcons();
+
+  const close = () => {
+    modal.classList.add("hidden");
+  };
+
+  const closeBtn = el("bug-report-close");
+  const dismissBtn = el("bug-report-dismiss");
+  const copyBtn = el("bug-report-copy");
+  const textarea = el("bug-report-text");
+
+  if (closeBtn) closeBtn.onclick = close;
+  if (dismissBtn) dismissBtn.onclick = close;
+  if (textarea) {
+    textarea.onclick = () => {
+      textarea.focus();
+      textarea.select();
+    };
+  }
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(reportText);
+        toast("Copied error report", "success");
+      } catch (_error) {
+        if (textarea) {
+          textarea.focus();
+          textarea.select();
+          document.execCommand("copy");
+          toast("Copied error report", "success");
+        } else {
+          toast("Copy failed", "error");
+        }
+      }
+    };
+  }
+}
+
+function installGlobalErrorReporter() {
+  let lastSignature = "";
+  let lastAt = 0;
+  let opened = false;
+
+  const maybeReport = (meta) => {
+    if (opened) return;
+    if (shouldIgnoreGlobalError(meta)) return;
+
+    const signature = `${meta.message || ""}|${meta.source || ""}|${meta.lineno || ""}|${meta.colno || ""}|${meta.stack || ""}`;
+    const now = Date.now();
+    if (signature === lastSignature && now - lastAt < 3000) return;
+    lastSignature = signature;
+    lastAt = now;
+
+    opened = true;
+    try {
+      const reportText = buildBugReportText(meta);
+      openBugReportModal(reportText, String(meta.message || "Unexpected Error").slice(0, 120));
+    } finally {
+      setTimeout(() => {
+        opened = false;
+      }, 800);
+    }
+  };
+
+  window.addEventListener("error", (event) => {
+    const err = event?.error;
+    maybeReport({
+      type: "error",
+      message: String(event?.message || err?.message || ""),
+      stack: String(err?.stack || ""),
+      source: String(event?.filename || ""),
+      lineno: Number(event?.lineno || 0) || 0,
+      colno: Number(event?.colno || 0) || 0,
+    });
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event?.reason;
+    const message = reason?.message ? String(reason.message) : String(reason || "Unhandled promise rejection");
+    maybeReport({
+      type: "unhandledrejection",
+      message,
+      stack: String(reason?.stack || ""),
+      source: "",
+      lineno: 0,
+      colno: 0,
+    });
+  });
 }
 
 async function openSimpleModal(options = {}) {
@@ -470,6 +656,7 @@ function activateNav() {
 function updateRailStatusDots() {
   const serverDot = el("rail-dot-servers");
   const devDot = el("rail-dot-devtools");
+  const vaultDot = el("rail-dot-vault");
   const awsDot = el("rail-dot-aws");
   if (serverDot) {
     const online = state.servers.some((s) => s.last_status === "online");
@@ -486,6 +673,14 @@ function updateRailStatusDots() {
   }
   if (awsDot) {
     awsDot.className = `rail-dot ${state.awsConnections.length ? "hidden" : "warn"}`;
+  }
+  if (vaultDot) {
+    const hasExpired = state.vaultEntries.some((entry) => {
+      if (!entry.expiry_date) return false;
+      const ms = new Date(entry.expiry_date).getTime();
+      return Number.isFinite(ms) && ms < Date.now();
+    });
+    vaultDot.className = `rail-dot ${hasExpired ? "error" : "hidden"}`;
   }
 }
 
@@ -1744,7 +1939,7 @@ function terminalHtml() {
             <div id="terminal-gui-content" class="flex-1 overflow-auto p-3 text-xs"></div>
           </section>
           <div id="terminal-panel-resizer" class="w-1.5 cursor-col-resize bg-transparent hover:bg-orange-500/30"></div>
-          <section class="flex-1 min-w-[280px] flex flex-col">
+          <section class="flex-1 min-w-[280px] flex flex-col min-h-0">
             <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between bg-gray-50 dark:bg-[#161b22]">
               <div class="flex items-center gap-2">
                 <div id="terminal-tab-bar" class="flex items-center gap-2"></div>
@@ -1758,7 +1953,7 @@ function terminalHtml() {
                 <button id="terminal-disconnect-btn" class="hover:text-red-500" title="Disconnect"><i data-lucide="x" class="w-4 h-4"></i></button>
               </div>
             </div>
-            <div id="terminal-container" class="flex-1 bg-[#0d1117] relative">
+            <div id="terminal-container" class="flex-1 bg-[#0d1117] relative min-h-0 overflow-hidden">
               <div id="terminal-animation-overlay" class="absolute inset-0 z-50 flex items-center justify-center bg-[#0d1117] hidden">
                 <div class="text-center">
                   <img src="https://media1.tenor.com/m/o_wT_K06VwMAAAAd/tom-and-jerry.gif" alt="Connecting..." class="w-48 h-48 object-contain rounded-lg mx-auto mb-4" />
@@ -1767,6 +1962,7 @@ function terminalHtml() {
               </div>
             </div>
             <div id="terminal-suggestions" class="hidden"></div>
+            <div id="terminal-ai-card" class="hidden border-t border-orange-300/40 dark:border-orange-600/40 bg-orange-50/70 dark:bg-orange-950/20 p-3"></div>
             <div id="terminal-error-card" class="hidden border-t border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 p-3"></div>
             <div id="terminal-explain-panel" class="hidden border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#161b22] p-3 max-h-56 overflow-auto text-sm"></div>
             <div class="px-3 py-2 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-[#161b22]">
@@ -1826,7 +2022,7 @@ async function ensureMonacoLoaded() {
       reject(new Error("Monaco loader unavailable"));
       return;
     }
-    window.require.config({ paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs" } });
+    window.require.config({ paths: { vs: "/vendor/monaco-editor/min/vs" } });
     window.require(["vs/editor/editor.main"], () => resolve(window.monaco), reject);
   });
   return monacoLoadPromise;
@@ -1898,7 +2094,7 @@ function renderGuiContent() {
                 : size > 1024
                   ? `${Math.round(size / 1024)}K`
                   : `${size}B`;
-            return `<div data-gui-file-open="${escapeHtml(entry.name)}" data-gui-file-type="${entry.type}" class="flex items-center justify-between px-2 py-1.5 cursor-pointer text-[11.5px] font-mono text-[var(--t3)] hover:bg-[var(--bg4)] hover:text-[var(--t2)] transition-colors group select-none">
+            return `<div data-gui-file-open="${escapeHtml(entry.name)}" data-gui-file-type="${entry.type}" data-gui-file-path="${escapeHtml(entry.path || "")}" class="flex items-center justify-between px-2 py-1.5 cursor-pointer text-[11.5px] font-mono text-[var(--t3)] hover:bg-[var(--bg4)] hover:text-[var(--t2)] transition-colors group select-none">
               <div class="flex items-center gap-2 min-w-0">
                 ${icon}
                 <span class="truncate group-hover:text-[var(--t)] transition-colors">${escapeHtml(entry.name)}</span>
@@ -2046,6 +2242,9 @@ async function loadActiveTerminalGuiTab(force = false) {
         path: state.terminalGui.path || "~",
         showHidden: Boolean(state.terminalGui.showHidden),
       });
+      if (state.terminalGui.files?.path) {
+        state.terminalGui.path = String(state.terminalGui.files.path);
+      }
     } else if (tab === "processes") {
       state.terminalGui.processes = await window.OggoAPI.guiListProcesses({ sessionId });
     } else if (tab === "services") {
@@ -2135,6 +2334,47 @@ function settingsHtml() {
           <div class="pt-4 flex items-center justify-between">
             <span class="text-sm text-gray-700 dark:text-gray-300">Enable password</span>
             ${toggle("passwordEnabled", s.passwordEnabled)}
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" data-ai-settings-section="1">
+        <h3 class="section-title"><i data-lucide="sparkles" class="w-5 h-5"></i> AI Assistant</h3>
+        <div class="space-y-5">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-700 dark:text-gray-300">Enable AI command suggestions (`dia-ai:`)</span>
+            ${toggle("ai.enabled", Boolean(state.aiAssistant?.enabled))}
+          </div>
+          <div id="ai-settings-fields" class="${state.aiAssistant?.enabled ? "" : "hidden"} space-y-4">
+            ${field(
+              "Model",
+              `<select id="ai-model" class="input">
+                ${(state.aiAssistant?.models || [])
+                  .map(
+                    (m) =>
+                      `<option value="${escapeHtml(m.id)}" ${String(state.aiAssistant?.model || "") === String(m.id) ? "selected" : ""}>${escapeHtml(m.label)}</option>`
+                  )
+                  .join("")}
+              </select>`
+            )}
+            ${field(
+              "NVIDIA API Key",
+              `<div class="space-y-2">
+                <div class="flex gap-2 items-center">
+                  <input id="ai-api-key" class="input flex-1" type="password" autocomplete="off" placeholder="${state.aiAssistant?.hasApiKey ? "Stored securely (enter to replace)" : "nvapi-..."}">
+                  <button type="button" id="ai-key-visibility" class="btn-secondary text-xs">Show</button>
+                </div>
+                <div class="text-xs text-gray-500">
+                  ${state.aiAssistant?.hasApiKey ? "Key saved securely on this machine." : "No key saved yet."}
+                </div>
+                <a href="https://build.nvidia.com" target="_blank" rel="noopener" class="text-xs text-orange-500 hover:underline">Get your key at build.nvidia.com</a>
+              </div>`
+            )}
+            <div class="flex flex-wrap gap-2">
+              <button type="button" id="ai-settings-save" class="btn-primary text-sm"><i data-lucide="save" class="w-4 h-4"></i> Save AI Settings</button>
+              <button type="button" id="ai-settings-test" class="btn-secondary text-sm"><i data-lucide="plug-zap" class="w-4 h-4"></i> Test connection</button>
+              <button type="button" id="ai-settings-forget" class="btn-secondary text-sm"><i data-lucide="eraser" class="w-4 h-4"></i> Forget key</button>
+            </div>
           </div>
         </div>
       </section>
@@ -2790,6 +3030,8 @@ function render() {
     root.innerHTML = envVarsHtml();
   } else if (state.view === "http-checks") {
     root.innerHTML = httpChecksHtml();
+  } else if (state.view === "vault-passwords") {
+    root.innerHTML = window.VaultPage?.render ? window.VaultPage.render(state) : "<div class='panel'>Vault page is loading...</div>";
   } else if (state.view === "terminal") {
     root.innerHTML = terminalHtml();
   } else if (state.view === "settings") {
@@ -2884,6 +3126,8 @@ async function refreshData() {
     portMonitors,
     envVars,
     httpChecks,
+    vaultEntries,
+    aiAssistant,
   ] = await Promise.all([
     window.OggoAPI.getJobs(),
     window.OggoAPI.getLogs({ limit: 100 }),
@@ -2901,6 +3145,14 @@ async function refreshData() {
     window.OggoAPI.listPortMonitors().catch(() => []),
     window.OggoAPI.listEnvVars().catch(() => []),
     window.OggoAPI.listHttpChecks().catch(() => []),
+    window.OggoAPI.getVaultEntries().catch(() => []),
+    window.OggoAPI.getTerminalAiSettings().catch(() => ({
+      enabled: false,
+      provider: "nvidia",
+      model: "meta/llama-3.1-70b-instruct",
+      hasApiKey: false,
+      models: [],
+    })),
   ]);
   state.jobs = jobs;
   state.logs = logs;
@@ -2925,6 +3177,8 @@ async function refreshData() {
   state.portMonitors = portMonitors;
   state.envVars = envVars;
   state.httpChecks = httpChecks;
+  state.vaultEntries = vaultEntries;
+  state.aiAssistant = aiAssistant;
   if (!state.awsActiveConnectionId && awsConnections.length) {
     state.awsActiveConnectionId = awsConnections[0].id;
   }
@@ -3012,7 +3266,7 @@ function openWorkspaceModal(workspace = null) {
         ${field(
           "Default region",
           `<select name="default_region" class="input">${state.awsRegions
-            .map((r) => `<option value="${r.id}" ${(workspace?.defaultRegion || workspace?.default_region || "us-east-1") === r.id ? "selected" : ""}>${r.name} (${r.id})</option>`)
+            .map((r) => `<option value="${r.code}" ${(workspace?.defaultRegion || workspace?.default_region || "us-east-1") === r.code ? "selected" : ""}>${r.name} (${r.code})</option>`)
             .join("")}</select>`
         )}
       </div>
@@ -3154,7 +3408,7 @@ function openWorkspaceServiceModal(serviceType, existingService = null) {
       <div>
         <div class="text-sm font-semibold mb-2">Service Configuration</div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-          ${field("AWS Region", `<select name="region" class="input">${state.awsRegions.map((r) => `<option value="${r.id}" ${regionValue === r.id ? "selected" : ""}>${r.name} (${r.id})</option>`).join("")}</select>`)}
+          ${field("AWS Region", `<select name="region" class="input">${state.awsRegions.map((r) => `<option value="${r.code}" ${regionValue === r.code ? "selected" : ""}>${r.name} (${r.code})</option>`).join("")}</select>`)}
           ${field(meta.resourceLabel, `<input name="resource_identifier" class="input" required value="${escapeHtml(existingService?.resourceIdentifier || existingService?.resource_identifier || "")}" />`)}
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">${serviceConfigFields(serviceType, config)}</div>
@@ -3916,6 +4170,8 @@ function openServerModal(server = null) {
   const modal = el("job-modal");
   const body = el("job-modal-body");
   const title = server ? "Edit Server" : "Add Server";
+  const sshVaultEntries = (state.vaultEntries || []).filter((entry) => entry.category === "ssh");
+  const linkedVault = server?.vault_entry_id ? sshVaultEntries.find((entry) => entry.id === server.vault_entry_id) : null;
 
   body.innerHTML = `
     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
@@ -3953,7 +4209,20 @@ function openServerModal(server = null) {
             <option value="key_passphrase" ${server?.auth_type === "key_passphrase" ? "selected" : ""}>Pasted Key + Passphrase</option>
           </select>`
         )}
+        <input type="hidden" name="vault_entry_id" value="${server?.vault_entry_id || ""}" />
         ${field("Password", `<input class="input" type="password" name="password" placeholder="${server ? "Leave empty to keep unchanged" : "Password"}" />`)}
+        <div class="floating-label-group">
+          <label>Vault</label>
+          <div class="flex items-center gap-2">
+            <button type="button" id="server-use-vault-btn" class="btn-secondary text-xs">Use from Vault</button>
+            <button type="button" id="server-manual-password-btn" class="btn-secondary text-xs ${server?.vault_entry_id ? "" : "hidden"}">Type manually</button>
+            <span id="server-vault-selected" class="text-xs ${server?.vault_entry_id ? "text-orange-500" : "text-gray-500"}">${server?.vault_entry_id ? `Using Vault: ${escapeHtml(linkedVault?.name || server.vault_entry_id)}` : "No vault entry selected"}</span>
+          </div>
+          <select id="server-vault-picker" class="input mt-2 hidden">
+            <option value="">Select SSH vault entry...</option>
+            ${sshVaultEntries.map((entry) => `<option value="${entry.id}" ${server?.vault_entry_id === entry.id ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}
+          </select>
+        </div>
         ${field("Private key path", `<input class="input" name="private_key_path" value="${server?.private_key_path || ""}" placeholder="~/.ssh/id_rsa" />`)}
         ${field("Paste private key", `<textarea class="input font-mono" name="private_key_content" placeholder="${server ? "Leave empty to keep unchanged" : "-----BEGIN OPENSSH PRIVATE KEY-----"}"></textarea>`)}
         ${field("Passphrase", `<input class="input" type="password" name="passphrase" placeholder="${server ? "Leave empty to keep unchanged" : "Optional"}" />`)}
@@ -3982,8 +4251,44 @@ function openServerModal(server = null) {
     if (!payload.private_key_content?.trim()) delete payload.private_key_content;
     if (!payload.passphrase?.trim()) delete payload.passphrase;
     if (!payload.private_key_path?.trim()) delete payload.private_key_path;
+    if (!payload.vault_entry_id?.trim()) delete payload.vault_entry_id;
     return payload;
   };
+
+  const vaultPicker = el("server-vault-picker");
+  const vaultHidden = el("server-vault-selected");
+  const useVaultBtn = el("server-use-vault-btn");
+  const manualBtn = el("server-manual-password-btn");
+  const passwordInput = body.querySelector('input[name="password"]');
+  if (useVaultBtn && vaultPicker) {
+    useVaultBtn.onclick = () => {
+      vaultPicker.classList.toggle("hidden");
+    };
+    vaultPicker.onchange = () => {
+      const selected = sshVaultEntries.find((entry) => entry.id === vaultPicker.value);
+      body.querySelector('input[name="vault_entry_id"]').value = selected?.id || "";
+      if (selected) {
+        vaultHidden.textContent = `Using Vault: ${selected.name}`;
+        vaultHidden.className = "text-xs text-orange-500";
+        manualBtn?.classList.remove("hidden");
+        if (passwordInput) passwordInput.value = "";
+      } else {
+        vaultHidden.textContent = "No vault entry selected";
+        vaultHidden.className = "text-xs text-gray-500";
+        manualBtn?.classList.add("hidden");
+      }
+    };
+  }
+  if (manualBtn) {
+    manualBtn.onclick = () => {
+      body.querySelector('input[name="vault_entry_id"]').value = "";
+      if (vaultPicker) vaultPicker.value = "";
+      vaultHidden.textContent = "No vault entry selected";
+      vaultHidden.className = "text-xs text-gray-500";
+      manualBtn.classList.add("hidden");
+      if (passwordInput) passwordInput.focus();
+    };
+  }
 
   el("server-test-btn").onclick = async () => {
     const payload = buildServerPayload(el("server-form"));
@@ -4582,7 +4887,9 @@ function connectTerminal(serverId) {
   if (webLinksAddon) term.loadAddon(webLinksAddon);
   if (searchAddon) term.loadAddon(searchAddon);
   term.open(container);
-  if (fit) fit.fit();
+  requestAnimationFrame(() => {
+    if (fit) fit.fit();
+  });
   term.writeln("\r\n  Connecting to server...\r\n");
 
   const overlay = el("terminal-animation-overlay");
@@ -4598,6 +4905,8 @@ function connectTerminal(serverId) {
   terminalCurrentLine = "";
   terminalSuggestions = [];
   terminalSuggestionIndex = -1;
+  terminalAiCard = { mode: "hidden", command: "", error: "", loadingText: "" };
+  renderTerminalAiCard();
 
   ws.onopen = () => {
     terminalGuiReady = true;
@@ -4644,6 +4953,8 @@ function connectTerminal(serverId) {
     const sessionNode = el("terminal-session-id");
     if (sessionNode) sessionNode.textContent = "-";
     if (overlay) overlay.classList.add("hidden");
+    terminalAiCard = { mode: "hidden", command: "", error: "", loadingText: "" };
+    renderTerminalAiCard();
     renderGuiContent();
   };
   ws.onerror = () => {
@@ -4654,13 +4965,26 @@ function connectTerminal(serverId) {
   term.onData((data) => {
     // Track current line buffer for smart suggestions and explain-last-command.
     if (data === "\r") {
-      // If suggestions are visible, Enter should accept the highlighted suggestion instead of executing.
-      if (terminalSuggestions.length > 0) {
-        const idx = terminalSuggestionIndex >= 0 ? terminalSuggestionIndex : 0;
-        applyTerminalSuggestion(idx);
+      const command = terminalCurrentLine.trim();
+      const lower = command.toLowerCase();
+      if (state.aiAssistant?.enabled && lower.startsWith("dia-ai:")) {
+        if (ws.readyState === WebSocket.OPEN) {
+          // Cancel the local shell line so `dia-ai:` text is never executed remotely.
+          ws.send(JSON.stringify({ type: "data", data: "\u0003" }));
+        }
+        const prompt = command.slice("dia-ai:".length).trim();
+        terminalCurrentLine = "";
+        hideTerminalSuggestions();
+        if (!prompt) {
+          renderTerminalAiCard({
+            mode: "error",
+            error: "Type your request after dia-ai:",
+          });
+          return;
+        }
+        runDiaAiPrompt(serverId, prompt);
         return;
       }
-      const command = terminalCurrentLine.trim();
       if (command) {
         localStorage.setItem("oggo.lastCommand", command);
         terminalCurrentLine = "";
@@ -4677,6 +5001,9 @@ function connectTerminal(serverId) {
       return;
     }
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "data", data }));
+    if (terminalSuggestions.length > 0) {
+      requestAnimationFrame(() => positionTerminalSuggestionsBox());
+    }
     debouncedTerminalSuggest(serverId);
   });
 
@@ -4685,14 +5012,22 @@ function connectTerminal(serverId) {
     if (terminalSuggestions.length > 0) {
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        terminalSuggestionIndex = Math.max(0, terminalSuggestionIndex - 1);
+        terminalSuggestionIndex =
+          terminalSuggestionIndex <= 0 ? terminalSuggestions.length - 1 : terminalSuggestionIndex - 1;
         renderTerminalSuggestionsBox();
         return false;
       }
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        terminalSuggestionIndex = Math.min(terminalSuggestions.length - 1, terminalSuggestionIndex + 1);
+        terminalSuggestionIndex =
+          terminalSuggestionIndex >= terminalSuggestions.length - 1 ? 0 : terminalSuggestionIndex + 1;
         renderTerminalSuggestionsBox();
+        return false;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        const idx = terminalSuggestionIndex >= 0 ? terminalSuggestionIndex : 0;
+        applyTerminalSuggestion(idx);
         return false;
       }
       if (event.key === "Escape") {
@@ -4725,14 +5060,21 @@ function connectTerminal(serverId) {
       });
       return false;
     }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      handleTerminalTabSuggestion(serverId);
+      return false;
+    }
     return true;
   });
   term.onResize(({ cols, rows }) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
     if (terminalFitAddon) terminalFitAddon.fit();
+    positionTerminalSuggestionsBox();
   });
   window.addEventListener("resize", () => {
     if (terminalFitAddon) terminalFitAddon.fit();
+    positionTerminalSuggestionsBox();
   });
 }
 
@@ -4752,15 +5094,202 @@ function renderTerminalErrorCard(errorData) {
   `;
 }
 
+/**
+ * Render AI command suggestion state directly under the terminal area.
+ * States: hidden -> loading -> ready (Run/Edit/Dismiss) or error.
+ *
+ * @param {{mode?: string, command?: string, error?: string, loadingText?: string}|null} next
+ */
+function renderTerminalAiCard(next = null) {
+  if (next) {
+    terminalAiCard = { ...terminalAiCard, ...next };
+  }
+  const node = el("terminal-ai-card");
+  if (!node) return;
+  if (!terminalAiCard || terminalAiCard.mode === "hidden") {
+    node.classList.add("hidden");
+    node.innerHTML = "";
+    return;
+  }
+  node.classList.remove("hidden");
+  if (terminalAiCard.mode === "loading") {
+    node.innerHTML = `
+      <div class="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400">
+        <span class="w-4 h-4 border-2 border-orange-500 border-t-transparent rounded-full inline-block animate-spin"></span>
+        <span>${escapeHtml(terminalAiCard.loadingText || "AI is thinking...")}</span>
+      </div>
+    `;
+    return;
+  }
+  if (terminalAiCard.mode === "error") {
+    node.innerHTML = `
+      <div class="text-sm text-red-600 dark:text-red-400">${escapeHtml(terminalAiCard.error || "AI command failed")}</div>
+      <div class="mt-2">
+        <button id="terminal-ai-open-settings" class="btn-secondary text-xs">Open Settings</button>
+      </div>
+    `;
+    const settingsBtn = el("terminal-ai-open-settings");
+    if (settingsBtn) {
+      settingsBtn.onclick = () => {
+        state.view = "settings";
+        state.navSection = "settings";
+        render();
+        bindViewEvents();
+      };
+    }
+    return;
+  }
+  const command = String(terminalAiCard.command || "");
+  node.innerHTML = `
+    <div class="text-xs uppercase tracking-wide text-orange-600 dark:text-orange-400 font-semibold">AI Suggestion</div>
+    <pre class="mt-1 p-2 rounded bg-black/10 dark:bg-black/30 text-sm overflow-x-auto">${escapeHtml(command)}</pre>
+    <div class="mt-2 flex flex-wrap gap-2">
+      <button id="terminal-ai-run" class="btn-primary text-xs">Run</button>
+      <button id="terminal-ai-edit" class="btn-secondary text-xs">Edit</button>
+      <button id="terminal-ai-dismiss" class="btn-secondary text-xs">Dismiss</button>
+    </div>
+  `;
+  const runBtn = el("terminal-ai-run");
+  if (runBtn) {
+    runBtn.onclick = () => {
+      if (terminalSocket?.readyState === WebSocket.OPEN && command) {
+        terminalSocket.send(JSON.stringify({ type: "data", data: `${command}\r` }));
+      }
+      terminalCurrentLine = "";
+      renderTerminalAiCard({ mode: "hidden", command: "" });
+    };
+  }
+  const editBtn = el("terminal-ai-edit");
+  if (editBtn) {
+    editBtn.onclick = () => {
+      if (terminalSocket?.readyState === WebSocket.OPEN && terminalInstance && command) {
+        terminalInstance.write(command);
+        terminalSocket.send(JSON.stringify({ type: "data", data: command }));
+        terminalCurrentLine = command;
+      }
+      renderTerminalAiCard({ mode: "hidden", command: "" });
+    };
+  }
+  const dismissBtn = el("terminal-ai-dismiss");
+  if (dismissBtn) {
+    dismissBtn.onclick = () => renderTerminalAiCard({ mode: "hidden", command: "" });
+  }
+}
+
+/**
+ * Submit a `dia-ai:` prompt to backend and surface one executable command.
+ * The prompt is capped client-side to keep payloads predictable.
+ *
+ * @param {string} _serverId
+ * @param {string} prompt
+ */
+async function runDiaAiPrompt(_serverId, prompt) {
+  const trimmed = String(prompt || "").trim().slice(0, 1000);
+  if (!trimmed) {
+    renderTerminalAiCard({ mode: "error", error: "Type your request after dia-ai:" });
+    return;
+  }
+  if (!state.aiAssistant?.enabled) return;
+  renderTerminalAiCard({
+    mode: "loading",
+    loadingText: "AI is thinking...",
+    error: "",
+    command: "",
+  });
+  try {
+    const result = await window.OggoAPI.generateTerminalAiCommand({
+      sessionId: terminalSessionId,
+      prompt: trimmed,
+    });
+    renderTerminalAiCard({
+      mode: "ready",
+      command: String(result?.command || "").trim(),
+    });
+  } catch (error) {
+    renderTerminalAiCard({
+      mode: "error",
+      error: String(error?.message || "AI request failed"),
+    });
+  }
+}
+
 function hideTerminalSuggestions() {
   const box = el("terminal-suggestions");
   if (!box) return;
   box.classList.add("hidden");
+  box.style.display = "none";
   box.innerHTML = "";
   terminalSuggestions = [];
   terminalSuggestionIndex = -1;
 }
 
+/**
+ * Build autocomplete context from the currently typed terminal line.
+ * Suggestions intentionally target command-name typing only (before first arg).
+ *
+ * @param {string} rawLine
+ * @returns {{line: string, hasSpace: boolean, token: string, query: string}}
+ */
+function getTerminalSuggestContext(rawLine) {
+  const line = String(rawLine || "");
+  const trimmedRight = line.replace(/\s+$/, "");
+  const hasSpace = /\s/.test(trimmedRight);
+  const token = (trimmedRight.split(/\s+/).pop() || "").trim();
+  return {
+    line,
+    hasSpace,
+    token,
+    // Keep live suggestions focused on command name only; args stay non-blocking.
+    query: hasSpace ? "" : token,
+  };
+}
+
+/**
+ * Position suggestion panel near the live cursor in xterm.
+ * Uses terminal cell size to track cursor and clamps panel into viewport.
+ */
+function positionTerminalSuggestionsBox() {
+  const box = el("terminal-suggestions");
+  const container = el("terminal-container");
+  if (!box || !container) return;
+  const host = container.querySelector(".xterm-screen") || container;
+  const rect = host.getBoundingClientRect();
+  const cols = Math.max(Number(terminalInstance?.cols || 0), 1);
+  const rows = Math.max(Number(terminalInstance?.rows || 0), 1);
+  const cellWidth = rect.width / cols;
+  const cellHeight = rect.height / rows;
+  const cursorX = Math.max(0, Number(terminalInstance?.buffer?.active?.cursorX || 0));
+  const cursorY = Math.max(0, Number(terminalInstance?.buffer?.active?.cursorY || 0));
+  const desiredWidth = Math.min(620, Math.max(360, Math.floor(rect.width * 0.62)));
+  const panelHeight = Math.max(180, Number(box.offsetHeight || 260));
+  const margin = 8;
+
+  const anchorX = rect.left + (cursorX * cellWidth);
+  const anchorY = rect.top + ((cursorY + 1) * cellHeight);
+  const minLeft = Math.round(rect.left + margin);
+  const maxLeft = Math.round(rect.right - desiredWidth - margin);
+  const left = Math.min(Math.max(Math.round(anchorX), minLeft), Math.max(minLeft, maxLeft));
+
+  let top = Math.round(anchorY + 6);
+  if (top + panelHeight > rect.bottom - margin) {
+    top = Math.round(anchorY - panelHeight - 10);
+  }
+  const minTop = Math.round(rect.top + margin);
+  const maxTop = Math.round(rect.bottom - panelHeight - margin);
+  top = Math.min(Math.max(top, minTop), Math.max(minTop, maxTop));
+
+  box.style.position = "fixed";
+  box.style.left = `${left}px`;
+  box.style.top = `${top}px`;
+  box.style.width = `${desiredWidth}px`;
+  box.style.transform = "none";
+}
+
+/**
+ * Render compact suggestion list similar to modern terminal UX:
+ * - one-line preview for non-selected rows
+ * - expanded details only for selected row
+ */
 function renderTerminalSuggestionsBox() {
   const box = el("terminal-suggestions");
   if (!box) return;
@@ -4772,38 +5301,66 @@ function renderTerminalSuggestionsBox() {
   if (terminalSuggestionIndex < 0) terminalSuggestionIndex = 0;
 
   box.classList.remove("hidden");
-  box.className = "absolute bottom-[40px] left-[20px] w-[500px] bg-[#111118] rounded-xl overflow-hidden z-[100] font-mono";
-  box.style.border = "1px solid rgba(249,115,22,0.3)";
-  box.style.boxShadow = "0 10px 30px rgba(0,0,0,0.5)";
+  box.style.display = "block";
+  box.className = "bg-[#1e1e1e] rounded-lg shadow-2xl z-[100] font-mono border border-white/10 overflow-hidden flex flex-col";
   
   const headerHtml = `
-    <div class="flex justify-between items-center px-3.5 py-1.5 border-b border-white/5 text-[11px] text-[#5A5A70]">
+    <div class="flex justify-between items-center px-3 py-2 bg-black/40 border-b border-white/5 text-[11px] text-gray-400 shrink-0">
       <span>${terminalSuggestions.length} suggestion${terminalSuggestions.length > 1 ? 's' : ''}</span>
-      <div class="flex gap-2.5">
-        <span class="flex items-center gap-1"><span class="border border-white/10 rounded px-1 pb-[1px]">↑↓</span> navigate</span>
-        <span class="flex items-center gap-1"><span class="border border-white/10 rounded px-1 pb-[1px]">Tab</span> accept</span>
-        <span class="flex items-center gap-1"><span class="border border-white/10 rounded px-1 pb-[1px]">Esc</span> dismiss</span>
+      <div class="flex gap-3">
+        <span class="flex items-center gap-1"><kbd class="bg-white/10 border border-white/10 rounded px-1 text-[10px]">↑↓</kbd> navigate</span>
+        <span class="flex items-center gap-1"><kbd class="bg-white/10 border border-white/10 rounded px-1 text-[10px]">Tab</kbd> accept</span>
+        <span class="flex items-center gap-1"><kbd class="bg-white/10 border border-white/10 rounded px-1 text-[10px]">Esc</kbd> dismiss</span>
       </div>
     </div>
   `;
 
-  const itemsHtml = terminalSuggestions.slice(0, 6).map((s, i) => {
+  const itemsHtml = terminalSuggestions.slice(0, 10).map((s, i) => {
     const isSelected = i === terminalSuggestionIndex;
-    const bgClass = isSelected ? "bg-[#f97316]/10" : "bg-transparent hover:bg-white/5";
-    const tagBg = s.source === "history" ? "bg-[#22C55E]/15" : "bg-[#F97316]/15";
-    const tagText = s.source === "history" ? "text-[#22C55E]" : "text-[#F97316]";
+    const bgClass = isSelected ? "bg-blue-500/10" : "hover:bg-white/5";
+    const borderClass = isSelected ? "border-l-2 border-blue-500" : "border-l-2 border-transparent";
     
-    return `
-      <div data-suggest-index="${i}" class="flex items-center gap-2.5 px-3.5 py-2.5 cursor-pointer border-b border-white/5 ${bgClass}">
-        <span class="text-[10px] px-1.5 py-0.5 rounded-[5px] shrink-0 ${tagBg} ${tagText}">${s.source}</span>
-        <span class="text-[13px] font-medium text-[#F1F1F3] shrink-0">${s.cmd}</span>
-        <span class="text-[12px] text-[#5A5A70] overflow-hidden text-ellipsis whitespace-nowrap">${s.desc || ""}</span>
-        <span class="ml-auto text-[11px] text-[#3A3A50] shrink-0">Tab</span>
-      </div>
-    `;
+    const tagBg = s.source === "history" ? "bg-green-500/20 text-green-400" : "bg-orange-500/20 text-orange-400";
+    const cmd = escapeHtml(s.cmd || "");
+    const desc = escapeHtml(s.desc || "");
+    const freq = s.source === "history" && s.freq ? `<span class="text-[10px] text-gray-500 ml-2">Used ${s.freq}x</span>` : "";
+
+    if (isSelected) {
+      return `
+        <div data-suggest-index="${i}" class="flex flex-col px-3 py-2.5 cursor-pointer border-b border-white/5 ${bgClass} ${borderClass}">
+          <div class="flex items-start gap-2">
+            <span class="text-[10px] px-1.5 py-0.5 rounded shrink-0 mt-0.5 uppercase tracking-wider font-bold ${tagBg}">${s.source}</span>
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium text-blue-100 break-words whitespace-pre-wrap leading-tight">${cmd}</div>
+            </div>
+            <span class="text-[10px] text-gray-500 mt-0.5 shrink-0">↵/Tab</span>
+          </div>
+          ${desc ? `<div class="mt-2 text-[12px] text-gray-400 whitespace-pre-wrap break-words leading-snug pl-10 border-l border-white/10 ml-1">${desc}</div>` : ""}
+          ${freq ? `<div class="mt-1 pl-12">${freq}</div>` : ""}
+        </div>
+      `;
+    } else {
+      return `
+        <div data-suggest-index="${i}" class="flex flex-col px-3 py-2 cursor-pointer border-b border-white/5 ${bgClass} ${borderClass}">
+          <div class="flex items-start gap-2">
+            <span class="text-[10px] px-1.5 py-0.5 rounded shrink-0 mt-0.5 uppercase tracking-wider font-bold ${tagBg}">${s.source}</span>
+            <div class="flex-1 min-w-0 flex items-baseline gap-3">
+              <div class="text-[13px] text-gray-300 truncate max-w-[60%] shrink-0">${cmd}</div>
+              ${desc ? `<div class="text-[12px] text-gray-500 truncate flex-1">${desc}</div>` : ""}
+            </div>
+          </div>
+        </div>
+      `;
+    }
   }).join("");
 
-  box.innerHTML = headerHtml + itemsHtml;
+  box.innerHTML = `
+    ${headerHtml}
+    <div class="overflow-y-auto max-h-[360px] custom-scrollbar bg-transparent">
+      ${itemsHtml}
+    </div>
+  `;
+  positionTerminalSuggestionsBox();
   box.onclick = (event) => {
     const idx = event.target.closest("[data-suggest-index]")?.dataset?.suggestIndex;
     if (idx === undefined) return;
@@ -4843,7 +5400,12 @@ let terminalSuggestTimer = null;
 function debouncedTerminalSuggest(serverId) {
   clearTimeout(terminalSuggestTimer);
   terminalSuggestTimer = setTimeout(() => {
-    showTerminalSuggestions(serverId, terminalCurrentLine);
+    const ctx = getTerminalSuggestContext(terminalCurrentLine);
+    if (!ctx.query || ctx.query.length < 2) {
+      hideTerminalSuggestions();
+      return;
+    }
+    showTerminalSuggestions(serverId, ctx.query);
   }, 200);
 }
 
@@ -5243,6 +5805,23 @@ function bindGlobalEvents() {
         openWorkspaceModal();
         return;
       }
+      if (action === "add-password") {
+        if (window.VaultPage?.openCreate) {
+          window.VaultPage.openCreate({
+            reload: async () => { await refreshData(); render(); bindViewEvents(); },
+            refresh: () => { render(); bindViewEvents(); },
+            toast,
+          });
+        }
+        return;
+      }
+      if (action === "vault-shared") {
+        state.view = "vault-passwords";
+        state.vaultFilter = "shared";
+        render();
+        bindViewEvents();
+        return;
+      }
       if (!view) return;
       state.view = view;
       if (workspaceId) {
@@ -5355,6 +5934,14 @@ function bindGlobalEvents() {
       const modal = el("job-modal");
       if (modal && !modal.classList.contains("hidden")) {
         modal.classList.add("hidden");
+        return;
+      }
+      if (state.view === "terminal") {
+        if (terminalSuggestions.length > 0) {
+          hideTerminalSuggestions();
+        }
+        // Never re-render/disconnect terminal on Escape.
+        return;
       }
       closePackagePanels();
       render();
@@ -6811,6 +7398,7 @@ function bindViewEvents() {
         if (!cm) return;
         cm.dataset.fileName = row.dataset.guiFileOpen;
         cm.dataset.fileType = row.dataset.guiFileType;
+        cm.dataset.filePath = row.dataset.guiFilePath || "";
         cm.style.left = `${event.clientX}px`;
         cm.style.top = `${event.clientY}px`;
         cm.classList.remove("hidden");
@@ -6828,13 +7416,11 @@ function bindViewEvents() {
           const action = actionBtn.dataset.ctxAction;
           const fileName = cm.dataset.fileName;
           const fileType = cm.dataset.fileType;
+          const filePath = String(cm.dataset.filePath || "");
           cm.classList.add("hidden");
           
           if (!fileName) return;
-          
-          const current = String(state.terminalGui.path || "~");
-          const base = current.endsWith("/") ? current.slice(0, -1) : current;
-          const filePath = base === "/" ? `/${fileName}` : `${base || "~"}/${fileName}`;
+          if (!filePath) return;
           
           try {
             const runCmd = async (cmd, allowSudo = true) => {
@@ -6869,7 +7455,8 @@ function bindViewEvents() {
             } else if (action === "rename") {
               const newName = await uiPrompt(`Rename ${fileName} to:`, { title: "Rename", okLabel: "Rename", defaultValue: fileName });
               if (!newName || newName === fileName) return;
-              const newPath = base === "/" ? `/${newName}` : `${base || "~"}/${newName}`;
+              const currentDir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) || "/" : "/";
+              const newPath = currentDir === "/" ? `/${newName}` : `${currentDir}/${newName}`;
               await runCmd(`mv "${filePath}" "${newPath}"`, true);
               toast("Renamed successfully", "success");
               await loadActiveTerminalGuiTab(true);
@@ -6944,18 +7531,18 @@ function bindViewEvents() {
           }
           const openName = event.target.closest("[data-gui-file-open]")?.dataset?.guiFileOpen;
           const openType = event.target.closest("[data-gui-file-open]")?.dataset?.guiFileType;
+          const openPath = event.target.closest("[data-gui-file-open]")?.dataset?.guiFilePath;
           if (openName) {
             if (openType === "directory") {
-              const current = String(state.terminalGui.path || "~");
-              const base = current.endsWith("/") ? current.slice(0, -1) : current;
-              state.terminalGui.path =
-                base === "/" ? `/${openName}` : `${base || "~"}/${openName}`;
+              state.terminalGui.path = String(openPath || state.terminalGui.path || "~");
               state.terminalGui.editor = null;
               await loadActiveTerminalGuiTab(true);
             } else {
-              const current = String(state.terminalGui.path || "~");
-              const base = current.endsWith("/") ? current.slice(0, -1) : current;
-              const filePath = base === "/" ? `/${openName}` : `${base || "~"}/${openName}`;
+              const filePath = String(openPath || "");
+              if (!filePath) {
+                toast("File path is missing", "error");
+                return;
+              }
               const result = await window.OggoAPI.guiFsRead({
                 sessionId: terminalSessionId,
                 serverId: state.activeTerminalServerId,
@@ -7131,11 +7718,11 @@ function bindViewEvents() {
   if (state.view === "settings") {
     el("settings-form").onsubmit = async (event) => {
       event.preventDefault();
-      const form = new FormData(event.target);
       const next = JSON.parse(JSON.stringify(state.settings));
 
       [...event.target.querySelectorAll("input,select,textarea")].forEach((input) => {
         if (!input.name) return;
+        if (input.name.startsWith("ai.")) return;
         const value =
           input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value || 0) : input.value;
         setByPath(next, input.name, value);
@@ -7171,6 +7758,86 @@ function bindViewEvents() {
       render();
       bindViewEvents();
     };
+
+    const aiToggle = document.querySelector('input[name="ai.enabled"]');
+    if (aiToggle) {
+      aiToggle.onchange = () => {
+        const fields = el("ai-settings-fields");
+        if (!fields) return;
+        if (aiToggle.checked) fields.classList.remove("hidden");
+        else fields.classList.add("hidden");
+      };
+    }
+    const keyVisibilityBtn = el("ai-key-visibility");
+    const keyInput = el("ai-api-key");
+    if (keyVisibilityBtn && keyInput) {
+      keyVisibilityBtn.onclick = () => {
+        const isHidden = keyInput.type === "password";
+        keyInput.type = isHidden ? "text" : "password";
+        keyVisibilityBtn.textContent = isHidden ? "Hide" : "Show";
+      };
+    }
+    const aiSaveBtn = el("ai-settings-save");
+    if (aiSaveBtn) {
+      aiSaveBtn.onclick = async () => {
+        const enabled = Boolean(document.querySelector('input[name="ai.enabled"]')?.checked);
+        const model = String(el("ai-model")?.value || "");
+        const apiKey = String(el("ai-api-key")?.value || "").trim();
+        try {
+          state.aiAssistant = await window.OggoAPI.saveTerminalAiSettings({
+            enabled,
+            model,
+            apiKey,
+            validate: Boolean(apiKey),
+          });
+          if (el("ai-api-key")) el("ai-api-key").value = "";
+          toast("AI assistant settings saved", "success");
+          render();
+          bindViewEvents();
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      };
+    }
+    const aiTestBtn = el("ai-settings-test");
+    if (aiTestBtn) {
+      aiTestBtn.onclick = async () => {
+        try {
+          await window.OggoAPI.testTerminalAiConnection();
+          toast("AI connection is working", "success");
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      };
+    }
+    const aiForgetBtn = el("ai-settings-forget");
+    if (aiForgetBtn) {
+      aiForgetBtn.onclick = async () => {
+        try {
+          state.aiAssistant = await window.OggoAPI.forgetTerminalAiKey();
+          toast("AI key removed", "success");
+          render();
+          bindViewEvents();
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      };
+    }
+  }
+
+  if (state.view === "vault-passwords" && window.VaultPage?.bind) {
+    window.VaultPage.bind(state, {
+      reload: async () => {
+        await refreshData();
+        render();
+        bindViewEvents();
+      },
+      refresh: () => {
+        render();
+        bindViewEvents();
+      },
+      toast,
+    });
   }
 }
 
@@ -7178,6 +7845,7 @@ async function bootstrap() {
   try {
     window.humanizeCron = humanizeCron;
     window.toast = toast;
+    installGlobalErrorReporter();
     await refreshData();
     window.OggoTheme.apply(state.settings.theme || window.OggoTheme.current || "dark");
     configureSoftwareAutoScan();

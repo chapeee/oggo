@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Oggo</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/vendor/tailwindcss.js"></script>
     <script>
       tailwind.config = {
         darkMode: "class",
@@ -36,7 +36,8 @@
         }
       };
     </script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+    <link rel="stylesheet" href="/vendor/file-icons-js/css/style.css" />
     <link rel="stylesheet" href="/css/style.css" />
   </head>
   <body class="bg-gray-50 dark:bg-[#0a0a0f] text-gray-900 dark:text-gray-100">
@@ -54,6 +55,7 @@
           <button class="rail-btn" data-rail-section="software" data-tooltip="Software"><span class="rail-icon-bg"><i data-lucide="package" class="w-4 h-4"></i></span></button>
           <button class="rail-btn" data-rail-section="storage" data-tooltip="Storage"><span class="rail-icon-bg"><i data-lucide="database" class="w-4 h-4"></i></span></button>
           <button class="rail-btn" data-rail-section="developer-tools" data-tooltip="Developer Tools"><span class="rail-icon-bg"><i data-lucide="code-2" class="w-4 h-4"></i></span><span id="rail-dot-devtools" class="rail-dot hidden"></span></button>
+          <button class="rail-btn" data-rail-section="vault" data-tooltip="Vault"><span class="rail-icon-bg"><i data-lucide="key-round" class="w-4 h-4"></i></span><span id="rail-dot-vault" class="rail-dot hidden"></span></button>
           <button class="rail-btn" data-rail-section="aws" data-tooltip="AWS Services"><span class="rail-icon-bg"><i data-lucide="box" class="w-4 h-4"></i></span><span id="rail-dot-aws" class="rail-dot hidden"></span></button>
           <div class="flex-1"></div>
           <div class="rail-separator"></div>
@@ -141,16 +143,15 @@
       </div>
     </div>
 
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="https://unpkg.com/cronstrue@latest/dist/cronstrue.min.js"></script>
-    <script src="https://unpkg.com/cron-parser@4.9.0/lib/browser.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/file-icons-js@1.1.0/dist/file-icons.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/vendor/lucide/dist/umd/lucide.min.js"></script>
+    <script src="/vendor/cronstrue/dist/cronstrue.min.js"></script>
+    <script src="/vendor/xterm/lib/xterm.js"></script>
+    <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+    <script src="/vendor/xterm-addon-web-links/lib/xterm-addon-web-links.js"></script>
+    <script src="/vendor/@xterm/addon-search/lib/addon-search.js"></script>
+    <script src="/vendor/monaco-editor/min/vs/loader.js"></script>
+    <script src="/vendor/file-icons-js/dist/file-icons.js"></script>
+    <script src="/vendor/chart.js/dist/chart.umd.js"></script>
     <div id="gui-context-menu" class="fixed hidden z-[9999] bg-[var(--bg3)] border border-[var(--b)] rounded-lg shadow-2xl overflow-hidden font-sans text-[12.5px] min-w-[180px] select-none text-[var(--t2)] py-1">
       <div data-ctx-action="open" class="px-3 py-1.5 cursor-pointer hover:bg-[var(--bg4)] hover:text-[var(--t)] flex items-center gap-2">
         <svg class="w-3.5 h-3.5 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Open
@@ -170,6 +171,7 @@
     <script src="/js/theme.js"></script>
     <script src="/js/cronBuilder.js"></script>
     <script src="/js/pages/workspaces.js"></script>
+    <script src="/js/pages/vault.js"></script>
     <script src="/js/app.js"></script>
   </body>
 </html>

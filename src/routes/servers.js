@@ -10,6 +10,7 @@ const {
   writeRemoteCrontab,
   executeRemoteCommand,
 } = require("../services/sshService");
+const { linkService, getLinkedServices, unlinkService } = require("../services/vaultService");
 
 const router = express.Router();
 
@@ -26,6 +27,7 @@ function mapServerPayload(body, existing = null) {
     color: body.color ?? existing?.color ?? "#4f46e5",
     tags: body.tags ?? existing?.tags ?? "",
     notes: body.notes ?? existing?.notes ?? "",
+    vault_entry_id: body.vault_entry_id ?? existing?.vault_entry_id ?? null,
     last_connected: existing?.last_connected || null,
     last_status: existing?.last_status || "unknown",
     created_at: existing?.created_at || now,
@@ -47,6 +49,29 @@ function mapServerPayload(body, existing = null) {
   return out;
 }
 
+/**
+ * Synchronize vault links for SSH password field.
+ *
+ * @param {string} serverId
+ * @param {string|null} previousVaultEntryId
+ * @param {string|null} nextVaultEntryId
+ * @returns {Promise<void>}
+ */
+async function syncServerVaultLink(serverId, previousVaultEntryId, nextVaultEntryId) {
+  const oldId = previousVaultEntryId ? String(previousVaultEntryId) : "";
+  const newId = nextVaultEntryId ? String(nextVaultEntryId) : "";
+  if (oldId && oldId !== newId) {
+    const links = await getLinkedServices(oldId);
+    const target = links.find(
+      (link) => link.service_type === "ssh_server" && link.service_id === serverId && link.field_name === "password"
+    );
+    if (target) await unlinkService(target.id);
+  }
+  if (newId) {
+    await linkService(newId, "ssh_server", serverId, "password");
+  }
+}
+
 router.get("/", async (req, res) => {
   const rows = await all("SELECT * FROM servers ORDER BY sort_order ASC, created_at DESC");
   res.json({ data: rows.map(sanitizeServer) });
@@ -57,7 +82,7 @@ router.post("/", async (req, res) => {
   if (!payload.name || !payload.host || !payload.username) {
     return res.status(400).json({ error: "name, host and username are required", code: "VALIDATION_ERROR" });
   }
-  if (payload.auth_type === "password" && !payload.password) {
+  if (payload.auth_type === "password" && !payload.password && !payload.vault_entry_id) {
     return res.status(400).json({ error: "Password auth requires password", code: "VALIDATION_ERROR" });
   }
   if ((payload.auth_type === "key" || payload.auth_type === "key_passphrase") && !payload.private_key_path && !payload.private_key_content) {
@@ -67,12 +92,13 @@ router.post("/", async (req, res) => {
   await run(`
       INSERT INTO servers (
         id, name, host, port, username, auth_type, password, private_key_path, private_key_content,
-        passphrase, color, tags, notes, last_connected, last_status, created_at, sort_order
+        passphrase, color, tags, notes, vault_entry_id, last_connected, last_status, created_at, sort_order
       ) VALUES (
         @id, @name, @host, @port, @username, @auth_type, @password, @private_key_path, @private_key_content,
-        @passphrase, @color, @tags, @notes, @last_connected, @last_status, @created_at, @sort_order
+        @passphrase, @color, @tags, @notes, @vault_entry_id, @last_connected, @last_status, @created_at, @sort_order
       )
     `, payload);
+  await syncServerVaultLink(payload.id, null, payload.vault_entry_id || null);
 
   res.status(201).json({ data: sanitizeServer(payload) });
 });
@@ -81,7 +107,7 @@ router.put("/:id", async (req, res) => {
   const existing = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
   if (!existing) return res.status(404).json({ error: "Server not found", code: "NOT_FOUND" });
   const payload = mapServerPayload(req.body || {}, existing);
-  if (payload.auth_type === "password" && !payload.password) {
+  if (payload.auth_type === "password" && !payload.password && !payload.vault_entry_id) {
     return res.status(400).json({ error: "Password auth requires password", code: "VALIDATION_ERROR" });
   }
   if ((payload.auth_type === "key" || payload.auth_type === "key_passphrase") && !payload.private_key_path && !payload.private_key_content) {
@@ -92,15 +118,24 @@ router.put("/:id", async (req, res) => {
       UPDATE servers SET
         name=@name, host=@host, port=@port, username=@username, auth_type=@auth_type, password=@password,
         private_key_path=@private_key_path, private_key_content=@private_key_content, passphrase=@passphrase,
-        color=@color, tags=@tags, notes=@notes, last_connected=@last_connected, last_status=@last_status,
+        color=@color, tags=@tags, notes=@notes, vault_entry_id=@vault_entry_id, last_connected=@last_connected, last_status=@last_status,
         sort_order=@sort_order
       WHERE id=@id
     `, payload);
+  await syncServerVaultLink(payload.id, existing.vault_entry_id || null, payload.vault_entry_id || null);
 
   res.json({ data: sanitizeServer(payload) });
 });
 
 router.delete("/:id", async (req, res) => {
+  const existing = await get("SELECT * FROM servers WHERE id = ?", [req.params.id]);
+  if (existing?.vault_entry_id) {
+    const links = await getLinkedServices(existing.vault_entry_id);
+    const target = links.find(
+      (link) => link.service_type === "ssh_server" && link.service_id === req.params.id && link.field_name === "password"
+    );
+    if (target) await unlinkService(target.id);
+  }
   await run("DELETE FROM servers WHERE id = ?", [req.params.id]);
   await run("DELETE FROM server_jobs WHERE server_id = ?", [req.params.id]);
   res.json({ message: "Server deleted" });

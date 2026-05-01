@@ -120,6 +120,22 @@ const API = {
   explainTerminalCommand(command) {
     return this.request("/api/terminal/explain", { method: "POST", body: JSON.stringify({ command }) });
   },
+  // Terminal AI assistant (dia-ai:) endpoints.
+  getTerminalAiSettings() {
+    return this.request("/api/terminal/ai/settings");
+  },
+  saveTerminalAiSettings(payload) {
+    return this.request("/api/terminal/ai/settings", { method: "POST", body: JSON.stringify(payload) });
+  },
+  testTerminalAiConnection() {
+    return this.request("/api/terminal/ai/test", { method: "POST" });
+  },
+  forgetTerminalAiKey() {
+    return this.request("/api/terminal/ai/key", { method: "DELETE" });
+  },
+  generateTerminalAiCommand(payload) {
+    return this.request("/api/terminal/ai/command", { method: "POST", body: JSON.stringify(payload) });
+  },
   riskCheckCommand(command) {
     return this.request("/api/terminal/risk-check", { method: "POST", body: JSON.stringify({ command }) });
   },
@@ -501,6 +517,36 @@ const API = {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  },
+  getVaultEntries() {
+    return this.request("/api/vault");
+  },
+  createVaultEntry(data) {
+    return this.request("/api/vault", { method: "POST", body: JSON.stringify(data) });
+  },
+  updateVaultEntry(id, data) {
+    return this.request(`/api/vault/${id}`, { method: "PUT", body: JSON.stringify(data) });
+  },
+  deleteVaultEntry(id, force = false) {
+    return this.request(`/api/vault/${id}?force=${force ? "true" : "false"}`, { method: "DELETE" });
+  },
+  copyVaultEntry(id) {
+    return this.request(`/api/vault/${id}/copy`, { method: "POST" });
+  },
+  rotateVaultEntry(id, newValue) {
+    return this.request(`/api/vault/${id}/rotate`, { method: "POST", body: JSON.stringify({ newValue }) });
+  },
+  getVaultEntryServices(id) {
+    return this.request(`/api/vault/${id}/services`);
+  },
+  linkVaultService(id, data) {
+    return this.request(`/api/vault/${id}/services`, { method: "POST", body: JSON.stringify(data) });
+  },
+  unlinkVaultService(id, linkId) {
+    return this.request(`/api/vault/${id}/services/${linkId}`, { method: "DELETE" });
+  },
+  generateVaultPassword(options) {
+    return this.request("/api/vault/generate", { method: "POST", body: JSON.stringify(options || {}) });
   },
 };
 

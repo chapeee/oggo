@@ -6,21 +6,20 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20Us-blue.svg)](#)
 
 > A production-grade, self-hosted cron job and server management platform with a built-in SSH terminal.
-> Originally built as my own personal ops/control center on my machine — now open-sourced so everything lives in one place. Over time this will grow to include more of my real-world tools from my old setup: AWS helpers, mail systems, SMB viewer, database backup automation, notes, and a password manager.
+> Originally built as a personal ops/control center and now open-sourced so everything can live in one place.
 
 ---
 
 ## 📸 Overview
 
-![Oggo Dashboard Screenshot](./docs/assets/screenshot.png)
-
-*A placeholder for a beautiful screenshot of the Oggo dashboard and SSH terminal.*
+Oggo combines server operations, cron scheduling, command intelligence, and secret management in one browser UI.
 
 ## ✨ Features
 
 - **Robust Job Management:** Create, schedule, and monitor cron jobs across multiple environments.
 - **Built-in SSH Terminal:** Native-feeling, WebSocket-powered terminal via `xterm.js` to manage your remote servers directly from the browser.
 - **Command Intelligence:** Smart, fuzzy-search autocomplete for terminal commands using official `tldr` data.
+- **AI Command Suggestions (`dia-ai:`):** Optional NVIDIA-powered command generation that is context-aware to the connected server OS/distro/shell.
 - **Encrypted Credentials:** Secure AES encryption for all stored passwords and SSH keys.
 - **Modern UI:** Professional dark/light mode interface built with Vanilla JS, Tailwind CSS, and Lucide icons.
 - **Real-time Analytics:** Built-in charts and execution tracking.
@@ -32,7 +31,7 @@
 
 ## 🚀 Quick Start
 
-Ensure you have [Node.js](https://nodejs.org/) installed (v18+ recommended).
+Ensure you have [Node.js](https://nodejs.org/) installed (v22+ recommended).
 
 ```bash
 # 1. Clone the repository
@@ -61,6 +60,43 @@ If you choose MySQL, the installer asks one-by-one for:
 
 Once running, Oggo will be available at `http://localhost:3030` (or the port specified in your config).
 
+## ⚙️ Key Options
+
+These are the main options users can configure today:
+
+- **Auth & Session**
+- Local auth mode and session handling from app settings / environment.
+- **Terminal**
+- SSH terminal with live suggestions, history, snippets, and per-server saved commands.
+- **Terminal AI Assistant (`dia-ai:`)**
+- Opt-in toggle, encrypted NVIDIA API key, model selector, test connection, and forget key controls.
+- **Vault**
+- Category-based secret forms (SSH, AWS, DB, API keys, certificates, and more) with encrypted secret storage.
+- **Workspaces**
+- Server grouping, default region, and attached service-level metadata.
+- **Theme**
+- Light/dark mode support across all modules.
+
+## 🔐 Environment Setup
+
+- Copy `.env.example` to `.env`.
+- Set runtime values such as app port and encryption keys.
+- Never commit real secrets to the repository.
+
+## 🧪 Development
+
+```bash
+# Development mode (graph + server in this workspace)
+npm run dev
+```
+
+- The project includes a graph index under `graphify-out/`.
+- If you change code structure, update the graph:
+
+```bash
+graphify update .
+```
+
 ## 🏠 Self-Hosting
 
 Oggo is designed to be self-hosted on your own infrastructure. For detailed instructions on setting up Oggo via Docker, PM2, or systemd, please refer to the [Self-Hosting Guide](docs/self-hosting.md).
@@ -71,11 +107,26 @@ Oggo is designed to be self-hosted on your own infrastructure. For detailed inst
 
 We welcome contributions from the community! Whether it's a bug fix, a new feature, or documentation improvements, please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting a Pull Request.
 
+Open-source project docs:
+
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
+- [Support](SUPPORT.md)
+- [Governance](GOVERNANCE.md)
+
 All contributions are licensed under the project's license.
 
 ## 🛡️ Security
 
 If you discover a security vulnerability, please do not open a public issue. Review our [Security Policy](SECURITY.md) for instructions on how to report it privately.
+
+## 🆘 Support
+
+- Review docs in `docs/` first (`installation`, `faq`, `self-hosting`, `architecture`).
+- For bugs/features, use GitHub Issues.
+- For contribution workflow, see [CONTRIBUTING.md](CONTRIBUTING.md).
+- For security reports, use [SECURITY.md](SECURITY.md).
 
 ## ⚖️ License
 

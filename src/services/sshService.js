@@ -110,6 +110,25 @@ function buildConnectConfig(server) {
   return connectConfig;
 }
 
+/**
+ * Resolve runtime auth credentials, preferring linked vault entry passwords.
+ *
+ * @param {Record<string, any>} server
+ * @returns {Promise<Record<string, any>>}
+ */
+async function resolveServerCredentials(server) {
+  const next = { ...server };
+  if (next.auth_type !== "password" || !next.vault_entry_id) return next;
+  // Lazy import to avoid hard coupling with vault route startup order.
+  // eslint-disable-next-line global-require
+  const { findById } = require("../db/repositories/vaultRepository");
+  const vaultEntry = await findById(next.vault_entry_id);
+  if (vaultEntry?.encrypted_value) {
+    next.password = decrypt(vaultEntry.encrypted_value);
+  }
+  return next;
+}
+
 function parseCrontab(content) {
   return content
     .split(/\r?\n/)
@@ -181,7 +200,11 @@ function executeRemoteCommand(server, command, options = {}) {
       reject(error);
     });
 
-    conn.connect(buildConnectConfig(server));
+    resolveServerCredentials(server)
+      .then((resolved) => {
+        conn.connect(buildConnectConfig(resolved));
+      })
+      .catch((error) => reject(error));
   });
 }
 
@@ -228,7 +251,16 @@ function testConnection(server) {
       resolve({ success: false, message: err.message });
     });
 
-    conn.connect(buildConnectConfig(server));
+    resolveServerCredentials(server)
+      .then((resolved) => {
+        conn.connect(buildConnectConfig(resolved));
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve({ success: false, message: error.message });
+      });
   });
 }
 
@@ -266,7 +298,7 @@ function generateKeyPair(type = "rsa") {
 function sanitizeServer(server) {
   if (!server) return null;
   const copy = { ...server };
-  copy.hasPassword = Boolean(copy.password);
+  copy.hasPassword = Boolean(copy.password || copy.vault_entry_id);
   copy.hasPrivateKey = Boolean(copy.private_key_content || copy.private_key_path);
   copy.hasPassphrase = Boolean(copy.passphrase);
   delete copy.password;
@@ -288,4 +320,5 @@ module.exports = {
   generateKeyPair,
   sanitizeServer,
   verifyOrSaveHostFingerprint,
+  resolveServerCredentials,
 };

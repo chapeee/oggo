@@ -27,9 +27,11 @@ const devToolsRouter = require("./routes/devtools");
 const { errorHandler } = require("./middleware/error-handler");
 const softwareRouter = require("./routes/software");
 const savedCommandsRouter = require("./routes/saved-commands");
+const vaultRouter = require("./routes/vault");
 const { ensureBuiltinSnippets } = require("./services/commandIntelService");
 const { initializeTldrIndex, shouldUpdate } = require("./services/tldrService");
 const { buildSearchIndex } = require("./services/searchService");
+const { checkExpiring } = require("./services/vaultService");
 const {
   createSession,
   attachClient,
@@ -115,6 +117,14 @@ async function init() {
   app.use("/api/search", searchRouter);
   app.use("/api/devtools", devToolsRouter);
   app.use("/api/software", softwareRouter);
+  app.use("/api/vault", vaultRouter);
+  app.use("/vendor", express.static(path.join(__dirname, "..", "node_modules")));
+
+  setInterval(() => {
+    checkExpiring().catch((error) => {
+      appLogger.warn(`Vault expiry check failed: ${error.message}`);
+    });
+  }, 24 * 60 * 60 * 1000);
 
   app.post("/api/server/restart", (req, res) => {
     res.json({ message: "Restarting server in background..." });
