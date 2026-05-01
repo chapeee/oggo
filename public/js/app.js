@@ -2342,7 +2342,7 @@ function settingsHtml() {
         <h3 class="section-title"><i data-lucide="sparkles" class="w-5 h-5"></i> AI Assistant</h3>
         <div class="space-y-5">
           <div class="flex items-center justify-between">
-            <span class="text-sm text-gray-700 dark:text-gray-300">Enable AI command suggestions (`dia-ai:`)</span>
+            <span class="text-sm text-gray-700 dark:text-gray-300">Enable AI command suggestions (<code>dia-ai:</code>)</span>
             ${toggle("ai.enabled", Boolean(state.aiAssistant?.enabled))}
           </div>
           <div id="ai-settings-fields" class="${state.aiAssistant?.enabled ? "" : "hidden"} space-y-4">

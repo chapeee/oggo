@@ -185,4 +185,8 @@ router.post("/ai/command", async (req, res) => {
   } catch (error) {
     const message = String(error?.message || "AI command failed");
     const status = message.includes("disabled") || message.includes("missing") ? 400 : 500;
-    return res.status(status).json({ error: message, c
+    return res.status(status).json({ error: message, code: "AI_COMMAND_FAILED" });
+  }
+});
+
+module.exports = router;

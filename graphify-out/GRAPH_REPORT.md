@@ -1,7 +1,7 @@
-# Graph Report - F:\projects\rajneesh\cronix  (2026-04-30)
+# Graph Report - F:\projects\rajneesh\cronix  (2026-05-01)
 
 ## Corpus Check
-- 68 files · ~142,514 words
+- 68 files · ~142,526 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
