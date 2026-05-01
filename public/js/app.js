@@ -248,6 +248,7 @@ let terminalSuggestions = [];
 let terminalSuggestionIndex = -1;
 let terminalHistoryOverlay = { visible: false, items: [], selected: 0, query: "" };
 let terminalAiCard = { mode: "hidden", command: "", error: "", loadingText: "" };
+const DIA_AI_TRIGGER_REGEX = /^dia\s*[-:]\s*ai\s*:?\s*/i;
 
 const presets = [
   ["Every minute", "* * * * *"],
@@ -278,6 +279,110 @@ function toast(message, type = "info") {
   node.textContent = message;
   el("toast-container").appendChild(node);
   setTimeout(() => node.remove(), 2800);
+}
+
+/**
+ * Match supported AI terminal trigger prefixes and return parsed prompt.
+ *
+ * Accepts both `dia-ai:` and `dia:ai` to be forgiving in terminal usage.
+ *
+ * @param {string} rawCommand
+ * @returns {{matched: boolean, prompt: string, prefix: string}}
+ */
+function parseDiaAiCommand(rawCommand) {
+  const command = String(rawCommand || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim();
+  if (!DIA_AI_TRIGGER_REGEX.test(command)) {
+    return { matched: false, prompt: "", prefix: "" };
+  }
+  const prefix = (command.match(DIA_AI_TRIGGER_REGEX) || [""])[0];
+  return {
+    matched: true,
+    prompt: command.slice(prefix.length).trim(),
+    prefix,
+  };
+}
+
+/**
+ * Best-effort extraction of currently typed shell command from xterm active buffer.
+ * This helps when local tracking and actual terminal buffer temporarily diverge.
+ *
+ * @returns {string}
+ */
+function getTerminalCommandFromBuffer() {
+  const term = terminalInstance;
+  const buffer = term?.buffer?.active;
+  if (!term || !buffer) return "";
+  const y = Number(buffer.cursorY || 0);
+  const x = Number(buffer.cursorX || 0);
+  const line = buffer.getLine(y)?.translateToString(true) || "";
+  const visible = line.slice(0, Math.max(0, x));
+  // Strip common prompt prefixes (`$ `, `# `, `> `) to isolate user input.
+  const promptMatch = visible.match(/(?:^|[\]\s])(?:\$|#|>)\s(.+)$/);
+  return promptMatch ? String(promptMatch[1] || "").trim() : String(visible || "").trim();
+}
+
+/**
+ * Apply a terminal input chunk to a local line buffer the same way the shell line would evolve.
+ * This makes AI trigger detection work for both character-by-character typing and pasted/chunked input.
+ *
+ * @param {string} currentLine
+ * @param {string} data
+ * @returns {{line: string, enterPressed: boolean}}
+ */
+function reduceTerminalInput(currentLine, data) {
+  let line = String(currentLine || "");
+  let enterPressed = false;
+  for (const ch of String(data || "")) {
+    if (ch === "\r") {
+      enterPressed = true;
+      break;
+    }
+    if (ch === "\u007F") {
+      line = line.slice(0, -1);
+      continue;
+    }
+    if (ch === "\t") {
+      continue;
+    }
+    if (ch >= " ") {
+      line += ch;
+    }
+  }
+  return { line, enterPressed };
+}
+
+/**
+ * Intercept AI trigger commands before they are forwarded to the remote shell.
+ * Returns true when the trigger was handled locally.
+ *
+ * @param {string} serverId
+ * @param {WebSocket} ws
+ * @returns {boolean}
+ */
+function handleDiaAiTerminalSubmit(serverId, ws) {
+  const tracked = String(terminalCurrentLine || "").trim();
+  const fromBuffer = getTerminalCommandFromBuffer();
+  const diaAi = parseDiaAiCommand(tracked).matched
+    ? parseDiaAiCommand(tracked)
+    : parseDiaAiCommand(fromBuffer);
+  if (!diaAi.matched) return false;
+  if (ws?.readyState === WebSocket.OPEN) {
+    // Clear any pending line from the remote readline buffer and cancel it.
+    ws.send(JSON.stringify({ type: "data", data: "\u0015\u0003" }));
+  }
+  terminalCurrentLine = "";
+  hideTerminalSuggestions();
+  if (!diaAi.prompt) {
+    renderTerminalAiCard({
+      mode: "error",
+      error: "Type your request after dia-ai: or dia:ai",
+    });
+    return true;
+  }
+  runDiaAiPrompt(serverId, diaAi.prompt);
+  return true;
 }
 
 const GITHUB_REPO_SLUG = "chapeee/oggo";
@@ -4963,26 +5068,26 @@ function connectTerminal(serverId) {
   };
 
   term.onData((data) => {
-    // Track current line buffer for smart suggestions and explain-last-command.
-    if (data === "\r") {
-      const command = terminalCurrentLine.trim();
-      const lower = command.toLowerCase();
-      if (state.aiAssistant?.enabled && lower.startsWith("dia-ai:")) {
+    const reduced = reduceTerminalInput(terminalCurrentLine, data);
+    // Detect AI trigger before forwarding this input chunk to the remote shell.
+    if (reduced.enterPressed) {
+      const command = reduced.line.trim();
+      const diaAi = parseDiaAiCommand(command);
+      if (diaAi.matched) {
         if (ws.readyState === WebSocket.OPEN) {
-          // Cancel the local shell line so `dia-ai:` text is never executed remotely.
-          ws.send(JSON.stringify({ type: "data", data: "\u0003" }));
+          // Clear the remote readline buffer first, then cancel, so the trigger never executes.
+          ws.send(JSON.stringify({ type: "data", data: "\u0015\u0003" }));
         }
-        const prompt = command.slice("dia-ai:".length).trim();
         terminalCurrentLine = "";
         hideTerminalSuggestions();
-        if (!prompt) {
+        if (!diaAi.prompt) {
           renderTerminalAiCard({
             mode: "error",
-            error: "Type your request after dia-ai:",
+            error: "Type your request after dia-ai: or dia:ai",
           });
           return;
         }
-        runDiaAiPrompt(serverId, prompt);
+        runDiaAiPrompt(serverId, diaAi.prompt);
         return;
       }
       if (command) {
@@ -4990,10 +5095,8 @@ function connectTerminal(serverId) {
         terminalCurrentLine = "";
         hideTerminalSuggestions();
       }
-    } else if (data === "\u007F") {
-      terminalCurrentLine = terminalCurrentLine.slice(0, -1);
-    } else if (data && data.length === 1 && data >= " " && data !== "\t") {
-      terminalCurrentLine += data;
+    } else {
+      terminalCurrentLine = reduced.line;
     }
 
     if (data === "\t") {
@@ -5009,6 +5112,10 @@ function connectTerminal(serverId) {
 
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown") return true;
+    if (event.key === "Enter" && handleDiaAiTerminalSubmit(serverId, ws)) {
+      event.preventDefault();
+      return false;
+    }
     if (terminalSuggestions.length > 0) {
       if (event.key === "ArrowUp") {
         event.preventDefault();
@@ -5189,7 +5296,13 @@ async function runDiaAiPrompt(_serverId, prompt) {
     renderTerminalAiCard({ mode: "error", error: "Type your request after dia-ai:" });
     return;
   }
-  if (!state.aiAssistant?.enabled) return;
+  if (!state.aiAssistant?.enabled) {
+    renderTerminalAiCard({
+      mode: "error",
+      error: "AI Assistant is disabled. Enable it in Settings first.",
+    });
+    return;
+  }
   renderTerminalAiCard({
     mode: "loading",
     loadingText: "AI is thinking...",
